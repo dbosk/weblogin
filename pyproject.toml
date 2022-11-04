@@ -4,7 +4,7 @@ version = "0.2"
 description = "Automates logging into web UIs to access unofficial APIs"
 authors = ["Daniel Bosk <dbosk@kth.se>"]
 license = "MIT"
-readme = "README.md"
+readme = "intro.md"
 repository = "https://github.com/dbosk/weblogin"
 include = ["src/**/*.py"]
 
