@@ -7,8 +7,7 @@ use the service, track the requests in the browser's developer tools.
 Then we can simply make the same requests from Python.
 
 ![Screenshot of the KTH UG Editor with Firefox's Developer Tools open,
-showing network requests made.](figs/ug.png){#UGEditor
-width="\\columnwidth"}
+showing network requests made.](https://github.com/dbosk/weblogin/raw/main/doc/figs/ug.png){#UGEditor width="\\columnwidth"}
 
 For instance, we can redo the request in
 [1](#UGEditor){reference-type="ref" reference="UGEditor"} like this:
