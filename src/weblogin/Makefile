@@ -11,6 +11,7 @@ __init__.py: init.py
 .PHONY: clean
 clean:
 	${RM} ${MODULES}
+	${RM} *.tex
 
 INCLUDE_MAKEFILES=../../makefiles
 include ${INCLUDE_MAKEFILES}/noweb.mk
