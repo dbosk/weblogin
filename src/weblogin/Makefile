@@ -6,7 +6,7 @@ all: ${MODULES}
 
 .INTERMEDIATE: init.py
 __init__.py: init.py
-	ln $< $@
+	${MV} $< $@
 
 .PHONY: clean
 clean:
