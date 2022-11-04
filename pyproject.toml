@@ -1,10 +1,16 @@
 [tool.poetry]
 name = "weblogin"
-version = "0.1"
+version = "0.2"
 description = "Automates logging into web UIs to access unofficial APIs"
 authors = ["Daniel Bosk <dbosk@kth.se>"]
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/dbosk/weblogin"
 include = ["src/**/*.py"]
+
+[tool.poetry.urls]
+"Bug Tracker" = "https://github.com/dbosk/ladok3/issues"
+"Releases" = "https://github.com/dbosk/ladok3/releases"
 
 [tool.poetry.dependencies]
 python = "^3.8"
