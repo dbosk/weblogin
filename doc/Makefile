@@ -4,10 +4,11 @@ all: weblogin.pdf
 LATEXFLAGS+=	-shell-escape
 TEX_PYTHONTEX=	yes
 
+weblogin.pdf: preamble.tex abstract.tex ../LICENSE
+weblogin.pdf: intro.tex
+
 weblogin.pdf: ../src/weblogin/init.tex
 weblogin.pdf: ../src/weblogin/kth.tex
-
-weblogin.pdf: preamble.tex abstract.tex ../LICENSE
 
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
