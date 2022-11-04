@@ -1,12 +1,8 @@
-We want to use APIs from webpages that requires login.
-This way we set up a session, login and then use the API of the page.
-Here we want to set up the automated login.
-
-
 \section{The [[AutologinSession]] abstract class}
 
-We provide an abstract class, [[AutologinSession]], through which we interact 
-with the web page's API.
+Here we document the [[weblogin]] main module.
+We provide an abstract class, [[weblogin.AutologinSession]], through which we 
+interact with the web page's API.
 This is a subclass to [[requests.Session]] and intercepts responses to check 
 for redirects to the login service.
 If we detect a redirect to the login service, we automatically log in, then 

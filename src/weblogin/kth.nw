@@ -1,7 +1,11 @@
 \section{Logging in at KTH}
 
+Here we provide the module [[weblogin.kth]], which serves as an example of how 
+to use [[weblogin]].
+
 We need a class for KTH that detects logins at KTH.
-Then we implement the missing methods in the [[AutologinSession]] class.
+Then we implement the missing methods in the [[weblogin.AutologinSession]] 
+class.
 <<kth.py>>=
 from lxml import html
 import requests
