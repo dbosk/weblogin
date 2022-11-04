@@ -1,0 +1,47 @@
+\documentclass[a4paper,oneside]{article}
+\usepackage{noweb}
+% Needed to relax penalty for breaking code chunks across pages, otherwise 
+% there might be a lot of space following a code chunk.
+\def\nwendcode{\endtrivlist \endgroup}
+\let\nwdocspar=\smallbreak
+
+\usepackage[hyphens]{url}
+\usepackage{hyperref}
+\usepackage{authblk}
+
+\input{preamble.tex}
+
+\title{%
+  \texttt{weblogin}: Automates logging into web UIs to access unofficial APIs
+}
+\author{%
+  Daniel Bosk
+}
+\affil{%
+  KTH EECS\\
+  \texttt{dbosk@kth.se}
+}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+  \input{abstract.tex}
+\end{abstract}
+
+\clearpage
+\vspace*{\fill}
+\VerbatimInput{../LICENSE}
+\clearpage
+
+\clearpage
+
+\tableofcontents
+\clearpage
+
+\input{../src/weblogin/init.tex}
+\input{../src/weblogin/kth.tex}
+
+\printbibliography
+
+
+\end{document}
