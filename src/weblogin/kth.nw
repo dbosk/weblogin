@@ -3,6 +3,8 @@
 We need a class for KTH that detects logins at KTH.
 Then we implement the missing methods in the [[AutologinSession]] class.
 <<kth.py>>=
+from lxml import html
+import requests
 import weblogin
 
 class AutologinSession(weblogin.AutologinSession):
@@ -115,9 +117,12 @@ trigger a redirect) and return the reply from the new request.
 new_response = self.get(self.__login_trigger_url)
 login_response = self.login(new_response)
 request_response = self.request(*args, **kwargs)
+
 if request_response.status_code == requests.codes.unauthorized:
   raise AuthenticationError(f"authentication apparently failed: "
                             f"{login_response.text}")
+
+return request_response
 @
 
 
@@ -133,21 +138,22 @@ the redirect ourselves using the [[login_trigger_url]].
 
 The two tests follow.
 <<test kth.py>>=
-import weblogin.kth
+from weblogin.kth import AutologinSession
 import os
+import requests
 
 def test_get_ui():
-  ug = session.AutologinSessionKTH(os.environ["KTH_LOGIN"],
-                                   os.environ["KTH_PASSWD"],
-                                   "https://app.kth.se/ug-gruppeditor/")
+  ug = AutologinSession(os.environ["KTH_LOGIN"],
+                        os.environ["KTH_PASSWD"],
+                        "https://app.kth.se/ug-gruppeditor/")
   response = ug.get("https://app.kth.se/ug-gruppeditor/")
   assert response.status_code == requests.codes.ok and \
-    response.url.find("https://app.kth.se/ug-gruppeditor/") == 0
+    response.url.find("https://app.kth.se") == 0
 
 def test_get_api():
-  ug = session.AutologinSessionKTH(os.environ["KTH_LOGIN"],
-                                   os.environ["KTH_PASSWD"],
-                                   "https://app.kth.se/ug-gruppeditor/")
+  ug = AutologinSession(os.environ["KTH_LOGIN"],
+                        os.environ["KTH_PASSWD"],
+                        "https://app.kth.se/ug-gruppeditor/")
   response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
                     "?editableBySelf=true")
   assert response.status_code == requests.codes.ok and response.json()

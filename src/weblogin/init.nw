@@ -13,7 +13,6 @@ If we detect a redirect to the login service, we automatically log in, then
 return the new response.
 The logging in will become completely invisible, as if it never happened.
 <<init.py>>=
-from lxml import html
 import requests
 
 <<exceptions>>

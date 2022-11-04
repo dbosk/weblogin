@@ -10,11 +10,11 @@ endef
 
 TESTS=	$(shell ${find_tests})
 
-$(foreach files,${TESTS},$(eval $(call def_target, ${files})))
-
 .PHONY: all
 all: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
 	poetry run pytest
+
+$(foreach files,${TESTS},$(eval $(call def_target, ${files})))
 
 .PHONY: clean
 clean:
