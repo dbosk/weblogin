@@ -1,0 +1,155 @@
+\section{Logging in at KTH}
+
+We need a class for KTH that detects logins at KTH.
+Then we implement the missing methods in the [[AutologinSession]] class.
+<<kth.py>>=
+import weblogin
+
+class AutologinSession(weblogin.AutologinSession):
+  """
+  requests.Session replacement to ensure all requests are automatically logged 
+  in at KTH.
+  """
+  
+  def __init__(self, username, password, login_trigger_url=None):
+    """
+    Creates a requests.Session that automatically logs into KTH.
+    Requires username and password.
+    Optional login_trigger_url is a page that redirects to the login page,
+    for instance, the API URLs don't redirect, but the UI URLs do.
+    """
+    super().__init__()
+    self.__username = username
+    self.__password = password
+    self.__login_trigger_url = login_trigger_url
+
+  def need_login(self, response):
+    """
+    Checks a response to determine if logging in is needed,
+    returns True if needed
+    """
+    <<check if we're redirected to login.ug.kth.se>>
+
+  def login(self, response, args=None, kwargs=None):
+    """
+    Performs a login based on the response from a request
+    args and kwargs are the options from the request triggering the login 
+    procedure, this is so that we can redo that request after loggin in.
+
+    Raises an AuthenticationError exception if authentication fails.
+    """
+    <<log in to login.ug.kth.se>>
+@
+
+\subsection{Check if we need to log in at KTH}
+
+There are two cases:
+\begin{enumerate}
+\item We get a 401, unauthorized.
+\item We get redirected to [[login.ug.kth.se]].
+\end{enumerate}
+Thus, we can detect this with either the return code or if the URL starts with 
+the URL to the login service, then we need to log in.
+<<check if we're redirected to login.ug.kth.se>>=
+return response.status_code == requests.codes.unauthorized or \
+  response.url.find("https://login.ug.kth.se") == 0
+@
+
+\subsection{Log in at KTH}\label{LoginAtKTH}
+
+If we need to log in, we have two cases.
+Either we got a 401 response, because we called an API URL without being 
+authenticated.
+Or, we tried to access a UI URL which redirected to the login page.
+
+If we got the first case, we called an API URL which gave a 401 unauthorized 
+response, we want to use the [[login_trigger_url]] to get into the second case.
+In the second case, response will contain the login page.
+We just need to fill the login form and submit it.
+<<log in to login.ug.kth.se>>=
+if response.status_code == requests.codes.unauthorized:
+  <<trigger redirect to login page>>
+else:
+  <<parse login page, post login form>>
+@
+
+Let's start with the simple case: parsing the login page and posting the login 
+form.
+This will contain the necessary redirects, so we just have to do it and then 
+the final response will redirect to the original page we were after.
+This means that we can simply return the
+<<parse login page, post login form>>=
+doc_tree = html.fromstring(response.text)
+form = doc_tree.xpath("//form[@id='loginForm']")[0]
+
+data = {}
+
+for variable in form.xpath("//input"):
+  if variable.value:
+    data[variable.name] = variable.value
+
+data["UserName"] = self.__username if "@ug.kth.se" in self.__username \
+                                   else self.__username + "@ug.kth.se"
+data["Password"] = self.__password
+data["Kmsi"] = True
+
+new_response = self.request(
+  form.method, "https://login.ug.kth.se" + form.action,
+  data=data)
+
+if new_response.status_code != requests.codes.ok:
+  raise AuthenticationError(
+    f"authentication as {self.__username} to {new_response.url} failed: "
+    f"{new_response.text}")
+
+return new_response
+@
+
+In the case where we just get the unauthorized, we have to simulate a redirect.
+We do this using the [[login_trigger_url]].
+We make a request to [[login_trigger_url]], this will trigger a redirect and we 
+can log in using the method above.
+When we've done that, we must re-run the original request (the one that didn't 
+trigger a redirect) and return the reply from the new request.
+<<trigger redirect to login page>>=
+new_response = self.get(self.__login_trigger_url)
+login_response = self.login(new_response)
+request_response = self.request(*args, **kwargs)
+if request_response.status_code == requests.codes.unauthorized:
+  raise AuthenticationError(f"authentication apparently failed: "
+                            f"{login_response.text}")
+@
+
+
+\section{Tests}
+
+It's hard to test the functionality.
+We basically want to test if the API on the other side still works.
+We can use the [[app.kth.se/ug-gruppeditor]] to test the two different 
+behaviours.
+The first requests the UI, which redirects automatically.
+The second tests the API, which doesn't redirect the request, but we must do 
+the redirect ourselves using the [[login_trigger_url]].
+
+The two tests follow.
+<<test kth.py>>=
+import weblogin.kth
+import os
+
+def test_get_ui():
+  ug = session.AutologinSessionKTH(os.environ["KTH_LOGIN"],
+                                   os.environ["KTH_PASSWD"],
+                                   "https://app.kth.se/ug-gruppeditor/")
+  response = ug.get("https://app.kth.se/ug-gruppeditor/")
+  assert response.status_code == requests.codes.ok and \
+    response.url.find("https://app.kth.se/ug-gruppeditor/") == 0
+
+def test_get_api():
+  ug = session.AutologinSessionKTH(os.environ["KTH_LOGIN"],
+                                   os.environ["KTH_PASSWD"],
+                                   "https://app.kth.se/ug-gruppeditor/")
+  response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
+                    "?editableBySelf=true")
+  assert response.status_code == requests.codes.ok and response.json()
+@
+

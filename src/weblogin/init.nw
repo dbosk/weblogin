@@ -1,0 +1,83 @@
+We want to use APIs from webpages that requires login.
+This way we set up a session, login and then use the API of the page.
+Here we want to set up the automated login.
+
+
+\section{The [[AutologinSession]] abstract class}
+
+We provide an abstract class, [[AutologinSession]], through which we interact 
+with the web page's API.
+This is a subclass to [[requests.Session]] and intercepts responses to check 
+for redirects to the login service.
+If we detect a redirect to the login service, we automatically log in, then 
+return the new response.
+The logging in will become completely invisible, as if it never happened.
+<<init.py>>=
+from lxml import html
+import requests
+
+<<exceptions>>
+
+class AutologinSession(requests.Session):
+  """
+  Maintains an authenticated session to a web system. This class intercepts any 
+  requests made in a requests.Session and ensures that we log in when 
+  redirected to the login page.
+
+  This is an abstract class.
+  """
+
+  def __init__(self):
+    super().__init__()
+    self.__logging_in = False
+
+  def login(self, response, args=None, kwargs=None):
+    """
+    Performs a login based on the response from a request.
+    args and kwargs are the options from the request triggering the login 
+    procedure, this is so that we can redo that request after loggin in.
+
+    Raises an AuthenticationError exception if authentication fails.
+    """
+    raise NotImplementedError()
+
+  def need_login(self, response):
+    """
+    Checks a response to determine if logging in is needed,
+    returns True if needed
+    """
+    raise NotImplementedError()
+
+  def request(self, *args, **kwargs):
+    """
+    Wrapper around requests.Session.request(...) to check if logging in
+    is needed.
+    """
+    response = super().request(*args, **kwargs)
+    
+    <<check if we need to log in>>
+
+    return response
+@
+
+Checking if we need to log in is a bit tricky.
+Any request we make to the login service, will also be intercepted.
+This is why we need the [[self.__logging_in]] attribute, to temporarily turn 
+this interception off.
+<<check if we need to log in>>=
+if not self.__logging_in and self.need_login(response):
+  self.__logging_in = True
+  response = self.login(response, args, kwargs)
+  self.__logging_in = False
+@
+
+
+\section{Errors}
+
+We must report authentication errors.
+For this we need specialized exceptions.
+<<exceptions>>=
+class AuthenticationError(Exception):
+  pass
+@
+
