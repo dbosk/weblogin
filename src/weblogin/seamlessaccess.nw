@@ -1,0 +1,101 @@
+\section{Looking up IDPs through SeamlessAccess.org}
+
+Here we provide the module [[weblogin.seamlessaccess]].
+
+There is a global service, SeamlessAccess.org, that provides SSO login services 
+for academic institutions.
+Essentially, what it does is to provide a look-up service for academic identity 
+providers.
+We will provide two functions using SeamlessAccess.org:
+\begin{enumerate}
+\item Search for an institution by name.
+\item Look up an institution by unique ID.
+\end{enumerate}
+
+The module is structured as follows.
+<<seamlessaccess.py>>=
+import requests
+
+<<functions>>
+@ We will test these functions using the following test script.
+<<test seamlessaccess.py>>=
+from weblogin.seamlessaccess import *
+
+<<test functions>>
+@
+
+\subsection{Look up an institution by unique ID}\label{LookUpByID}
+
+We can look up an institution by unique ID (what appears to be a SHA1 hash).
+This is simply a GET request resulting in a JSON-formatted response.
+<<functions>>=
+def get_entity_data_by_id(id):
+  """
+  Requests entity data from SeamlessAccess.org for entity with unique ID `id`.
+  Returns JSON (dictionary) containing data.
+  """
+  response = requests.get(f"https://md.seamlessaccess.org/entities/{id}.json")
+  try:
+    return response.json()
+  except:
+    raise Exception(f"invalid response from SeamlessAccess.org for ID {id}")
+@
+
+We can test this functions as follows:
+<<test functions>>=
+def test_get_entity_data_by_id():
+  data = get_entity_data_by_id("{sha1}e26e5d098f073536d0351577c98c83825f0f922c")
+  assert data["id"] == "{sha1}e26e5d098f073536d0351577c98c83825f0f922c"
+@
+
+The resulting JSON data for this particular ID is:
+\begin{pycode}
+import json
+from weblogin.seamlessaccess import *
+
+print(r"\begin{minted}{json}")
+print(json.dumps(
+  get_entity_data_by_id("{sha1}e26e5d098f073536d0351577c98c83825f0f922c"),
+  indent=2
+))
+print(r"\end{minted}")
+\end{pycode}
+
+\subsection{Searching for an institution by name}
+
+We can also search for an institution by name.
+This yields a list of JSON objects as in \cref{LookUpByID}.
+<<functions>>=
+def find_entity_data_by_name(name):
+  """
+  Searches SeamlessAccess.org for an institution by name `name`.
+  Returns a list of institutions' data.
+  """
+  response = requests.get(f"https://md.seamlessaccess.org/entities/?q={name}")
+  try:
+    return response.json()
+  except:
+    raise Exception(f"invalid response from SeamlessAccess.org for name {name}")
+@
+
+We can test this functions as follows:
+<<test functions>>=
+def test_find_entity_data_by_name():
+  data = find_entity_data_by_name("KTH")
+  assert data[0]["id"] == "{sha1}e26e5d098f073536d0351577c98c83825f0f922c"
+@
+
+The resulting JSON data for this particular ID is the following.
+Note that the difference compared to the data in \cref{LookUpByID} is that this 
+is one element in a list.
+\begin{pycode}
+import json
+from weblogin.seamlessaccess import *
+
+print(r"\begin{minted}{json}")
+print(json.dumps(
+  find_entity_data_by_name("KTH"),
+  indent=2
+))
+print(r"\end{minted}")
+\end{pycode}

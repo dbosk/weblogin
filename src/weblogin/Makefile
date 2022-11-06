@@ -1,4 +1,5 @@
 MODULES+=	__init__.py
+MODULES+=	seamlessaccess.py
 MODULES+=	kth.py
 
 .PHONY: all
