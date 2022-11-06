@@ -11,6 +11,8 @@ from lxml import html
 import requests
 import weblogin
 
+LOGIN_SERVER = "login.ug.kth.se"
+
 class AutologinSession(weblogin.AutologinSession):
   """
   requests.Session replacement to ensure all requests are automatically logged 
@@ -34,7 +36,7 @@ class AutologinSession(weblogin.AutologinSession):
     Checks a response to determine if logging in is needed,
     returns True if needed
     """
-    <<check if we're redirected to login.ug.kth.se>>
+    <<check if we're redirected to login server>>
 
   def login(self, response, args=None, kwargs=None):
     """
@@ -44,21 +46,22 @@ class AutologinSession(weblogin.AutologinSession):
 
     Raises an AuthenticationError exception if authentication fails.
     """
-    <<log in to login.ug.kth.se>>
+    <<log in to login server>>
 @
 
 \subsection{Check if we need to log in at KTH}
 
 There are two cases:
 \begin{enumerate}
-\item We get a 401, unauthorized.
-\item We get redirected to [[login.ug.kth.se]].
+\item We get a 401 unauthorized for a [[kth.se]] URL.
+\item We get redirected to the login server.
 \end{enumerate}
 Thus, we can detect this with either the return code or if the URL starts with 
 the URL to the login service, then we need to log in.
-<<check if we're redirected to login.ug.kth.se>>=
-return response.status_code == requests.codes.unauthorized or \
-  response.url.find("https://login.ug.kth.se") == 0
+<<check if we're redirected to login server>>=
+return (response.status_code == requests.codes.unauthorized and \
+          "kth.se" in response.url) or \
+        response.url.find(f"https://{LOGIN_SERVER}") == 0
 @
 
 \subsection{Log in at KTH}\label{LoginAtKTH}
@@ -72,7 +75,7 @@ If we got the first case, we called an API URL which gave a 401 unauthorized
 response, we want to use the [[login_trigger_url]] to get into the second case.
 In the second case, response will contain the login page.
 We just need to fill the login form and submit it.
-<<log in to login.ug.kth.se>>=
+<<log in to login server>>=
 if response.status_code == requests.codes.unauthorized:
   <<trigger redirect to login page>>
 else:
@@ -100,7 +103,7 @@ data["Password"] = self.__password
 data["Kmsi"] = True
 
 new_response = self.request(
-  form.method, "https://login.ug.kth.se" + form.action,
+  form.method, f"https://{LOGIN_SERVER}/{form.action}",
   data=data)
 
 if new_response.status_code != requests.codes.ok:
