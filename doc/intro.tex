@@ -18,12 +18,15 @@ Then we can simply make the same requests from Python.
 
 For instance, we can redo the request in \cref{UGEditor} like this:
 \begin{minted}{python}
-from weblogin.kth import AutologinSession
+import weblogin
+import weblogin.kth
 import os
 
-ug = AutologinSession(os.environ["KTH_LOGIN"],
-                      os.environ["KTH_PASSWD"],
-                      "https://app.kth.se/ug-gruppeditor/")
+ug = weblogin.AutologinSession([
+                weblogin.kth.UGlogin(os.environ["KTH_LOGIN"],
+                                     os.environ["KTH_PASSWD"],
+                                     "https://app.kth.se/ug-gruppeditor/")
+            ])
 
 response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/users"
                   "?filter=memberOf eq 'u26yk1i3'")
