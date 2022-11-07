@@ -1,35 +1,35 @@
 \section{Logging in at KTH}
 
 Here we provide the module [[weblogin.kth]], which serves as an example of how 
-to use [[weblogin]].
+to write a login handler for use with [[weblogin.AutologinSession]].
 
 We need a class for KTH that detects logins at KTH.
-Then we implement the missing methods in the [[weblogin.AutologinSession]] 
+Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
 class.
 <<kth.py>>=
 from lxml import html
 import requests
 import weblogin
 
-LOGIN_SERVER = "login.ug.kth.se"
-
-class AutologinSession(weblogin.AutologinSession):
+class UGlogin(weblogin.AutologinHandler):
   """
-  requests.Session replacement to ensure all requests are automatically logged 
-  in at KTH.
+  Login handler (weblogin.AutologinHandler) for UG logins, i.e. through 
+  login.ug.kth.se.
   """
+  LOGIN_URL = "https://login.ug.kth.se"
   
   def __init__(self, username, password, login_trigger_url=None):
     """
-    Creates a requests.Session that automatically logs into KTH.
-    Requires username and password.
-    Optional login_trigger_url is a page that redirects to the login page,
-    for instance, the API URLs don't redirect, but the UI URLs do.
+    Creates a login handler that automatically logs into KTH.
+    - Requires username and password.
+    - Optional `login_trigger_url` is a page that redirects to the login page,
+      for instance, the API URLs don't redirect, but the UI URLs do.
     """
     super().__init__()
     self.__username = username
     self.__password = password
     self.__login_trigger_url = login_trigger_url
+    self.__logging_in = False
 
   def need_login(self, response):
     """
@@ -38,16 +38,24 @@ class AutologinSession(weblogin.AutologinSession):
     """
     <<check if we're redirected to login server>>
 
-  def login(self, response, args=None, kwargs=None):
+  def login(self, session, response, args=None, kwargs=None):
     """
-    Performs a login based on the response from a request
-    args and kwargs are the options from the request triggering the login 
-    procedure, this is so that we can redo that request after loggin in.
+    Performs a login based on the response `response` from a request to session 
+    `session`.
+    `args` and `kwargs` are the options from the request triggering the login 
+    procedure, this is so that we can redo that request after logging in.
 
     Raises an AuthenticationError exception if authentication fails.
     """
+    self.__logging_in = True
     <<log in to login server>>
+    self.__logging_in = False
 @
+
+We note that while we're logging in, we don't want those requests interrupted 
+by another login session.
+Hence, we block any new login procedures from starting by setting 
+[[self.__logging_in]].
 
 \subsection{Check if we need to log in at KTH}
 
@@ -58,10 +66,15 @@ There are two cases:
 \end{enumerate}
 Thus, we can detect this with either the return code or if the URL starts with 
 the URL to the login service, then we need to log in.
+However, as noted above, this only applies if we're not already underway with a 
+login.
 <<check if we're redirected to login server>>=
+if self.__logging_in:
+  return False
+
 return (response.status_code == requests.codes.unauthorized and \
           "kth.se" in response.url) or \
-        response.url.find(f"https://{LOGIN_SERVER}") == 0
+       response.url.find(self.LOGIN_URL) == 0
 @
 
 \subsection{Log in at KTH}\label{LoginAtKTH}
@@ -102,8 +115,8 @@ data["UserName"] = self.__username if "@ug.kth.se" in self.__username \
 data["Password"] = self.__password
 data["Kmsi"] = True
 
-new_response = self.request(
-  form.method, f"https://{LOGIN_SERVER}/{form.action}",
+new_response = session.request(
+  form.method, f"{self.LOGIN_URL}/{form.action}",
   data=data)
 
 if new_response.status_code != requests.codes.ok:
@@ -121,9 +134,9 @@ can log in using the method above.
 When we've done that, we must re-run the original request (the one that didn't 
 trigger a redirect) and return the reply from the new request.
 <<trigger redirect to login page>>=
-new_response = self.get(self.__login_trigger_url)
-login_response = self.login(new_response)
-request_response = self.request(*args, **kwargs)
+new_response = session.get(self.__login_trigger_url)
+login_response = self.login(session, new_response)
+request_response = session.request(*args, **kwargs)
 
 if request_response.status_code == requests.codes.unauthorized:
   raise AuthenticationError(f"authentication apparently failed: "
@@ -133,7 +146,7 @@ return request_response
 @
 
 
-\section{Tests}
+\subsection{Tests}
 
 It's hard to test the functionality.
 We basically want to test if the API on the other side still works.
@@ -145,22 +158,25 @@ the redirect ourselves using the [[login_trigger_url]].
 
 The two tests follow.
 <<test kth.py>>=
-from weblogin.kth import AutologinSession
+from weblogin import AutologinSession
+from weblogin.kth import UGlogin
 import os
 import requests
 
 def test_get_ui():
-  ug = AutologinSession(os.environ["KTH_LOGIN"],
-                        os.environ["KTH_PASSWD"],
-                        "https://app.kth.se/ug-gruppeditor/")
+  ug = AutologinSession([
+    UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
+            "https://app.kth.se/ug-gruppeditor/")
+    ])
   response = ug.get("https://app.kth.se/ug-gruppeditor/")
   assert response.status_code == requests.codes.ok and \
     response.url.find("https://app.kth.se") == 0
 
 def test_get_api():
-  ug = AutologinSession(os.environ["KTH_LOGIN"],
-                        os.environ["KTH_PASSWD"],
-                        "https://app.kth.se/ug-gruppeditor/")
+  ug = AutologinSession([
+    UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
+            "https://app.kth.se/ug-gruppeditor/")
+    ])
   response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
                     "?editableBySelf=true")
   assert response.status_code == requests.codes.ok and response.json()
