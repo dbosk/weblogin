@@ -2,6 +2,7 @@ SUBDIR_GOALS=all clean distclean
 
 SUBDIR+=	src/weblogin
 SUBDIR+=	doc
+SUBDIR+=	tests
 
 version=$(shell sed -n 's/^ *version *= *\"\([^\"]\+\)\"/\1/p' pyproject.toml)
 
