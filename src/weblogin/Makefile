@@ -11,7 +11,7 @@ __init__.py: init.py
 
 .PHONY: clean
 clean:
-	${RM} ${MODULES}
+	${RM} -R ${MODULES} __pycache__
 	${RM} *.tex
 
 INCLUDE_MAKEFILES=../../makefiles
