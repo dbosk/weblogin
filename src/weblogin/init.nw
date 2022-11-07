@@ -87,7 +87,7 @@ Each handler will possibly update the response for the next handler.
 <<log in if necessary>>=
 for handler in self.__handlers:
   if handler.need_login(response):
-    response = handler.login(session, response, args, kwargs)
+    response = handler.login(self, response, args, kwargs)
 @
 
 The benefit of this design comes when trying to log in using an SSO:
