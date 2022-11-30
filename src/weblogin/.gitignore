@@ -1,7 +1,9 @@
 init.tex
 kth.tex
+ladok.tex
 __init__.py
 kth.py
+ladok.py
 __pycache__/
 seamlessaccess.py
 seamlessaccess.tex

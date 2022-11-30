@@ -1,6 +1,7 @@
 MODULES+=	__init__.py
 MODULES+=	seamlessaccess.py
 MODULES+=	kth.py
+MODULES+=	ladok.py
 
 .PHONY: all
 all: ${MODULES}
