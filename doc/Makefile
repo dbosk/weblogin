@@ -9,8 +9,9 @@ weblogin.pdf: preamble.tex abstract.tex ../LICENSE
 weblogin.pdf: intro.tex
 
 weblogin.pdf: ../src/weblogin/init.tex
-weblogin.pdf: ../src/weblogin/seamlessaccess.tex
 weblogin.pdf: ../src/weblogin/kth.tex
+weblogin.pdf: ../src/weblogin/seamlessaccess.tex
+weblogin.pdf: ../src/weblogin/ladok.tex
 weblogin.pdf: ../src/weblogin
 
 ../src/weblogin::

@@ -1,0 +1,200 @@
+\section{Logging in to LADOK}
+
+Here we provide the module [[weblogin.ladok]], which serves as a more complex 
+example of how to write a login handler for use with 
+[[weblogin.AutologinSession]].
+
+We will create a login handler for LADOK.
+As LADOK supports logging in using SSO from all Swedish universities, we will 
+use this handler in conjunction with a login handler for a university (for 
+instance the ones for KTH in \cref{KTHhandler,SAMLhandler}).
+
+We need a class for LADOK that detects logins to LADOK.
+Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
+class.
+<<ladok.py>>=
+from lxml import html
+import requests
+import weblogin
+import weblogin.seamlessaccess as sa
+import urllib.parse
+
+class SSOlogin(weblogin.AutologinHandler):
+  """
+  Login handler (weblogin.AutologinHandler) for LADOK logins.
+  """
+  LOGIN_URL = "https://www.start.ladok.se/gui/loggain"
+  
+  def __init__(self,
+      institution,
+      login_trigger_url="https://www.start.ladok.se/gui/"):
+    """
+    Creates a login handler that automates the LADOK part of authentication.
+    - Requires `institution`. A string identifying the instutution at 
+      SeamlessAccess.org.
+    - Optional `login_trigger_url` is a page that redirects to the login page,
+      for instance, the API URLs don't redirect, but the UI URLs do.
+
+    This login handler must be used in conjunction with a university login 
+    handler.
+    """
+    super().__init__()
+    self.__institution = institution
+    self.__login_trigger_url = login_trigger_url
+    self.__logging_in = False
+
+  def need_login(self, response):
+    """
+    Checks a response to determine if logging in is needed,
+    returns True if needed
+    """
+    <<check if we're redirected to login server>>
+
+  def login(self, session, response, args=None, kwargs=None):
+    """
+    Performs a login based on the response `response` from a request to session 
+    `session`.
+    `args` and `kwargs` are the options from the request triggering the login 
+    procedure, this is so that we can redo that request after logging in.
+
+    Raises an AuthenticationError exception if authentication fails.
+    """
+    self.__logging_in = True
+    <<log in to login server>>
+    self.__logging_in = False
+
+    if args and response.history:
+      return session.request(*args, **kwargs)
+    return ladok_response
+@
+
+We note that while we're logging in, we don't want those requests interrupted 
+by another login session.
+Hence, we block any new login procedures from starting by setting 
+[[self.__logging_in]].
+
+\subsection{Tests and intended usage}
+
+We will test this by a simple API call to LADOK.
+We will get the record of the currently logged in user from LADOK.
+We will use author's institution for this test, which means only the author can 
+run this test.
+
+Now this illustrates that this login handler only fulfills a small part of the 
+login procedure.
+We need two more handlers in this case, one for the SAML implementation 
+([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the 
+institution ([[weblogin.kth.UGlogin]] below).
+<<test ladok.py>>=
+from weblogin import AutologinSession
+from weblogin import kth, ladok
+import os
+import requests
+
+def test_get_user_info():
+  ls = AutologinSession([
+      ladok.SSOlogin("KTH Royal Institute of Technology"),
+      kth.SAMLlogin(),
+      kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+    ])
+
+  headers = {}
+  headers["Accept"] =       "application/vnd.ladok-resultat+json"
+  headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
+  headers["Accept"] +=    ", application/vnd.ladok-extra+json"
+  headers["Accept"] +=    ", application/json, text/plain"
+  headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
+
+  response = ls.get(
+    "https://www.start.ladok.se/gui/proxy"
+      "/kataloginformation/anvandare/anvandarinformation",
+    headers=headers
+  )
+
+  assert response.status_code == requests.codes.ok \
+     and response.json()["Epost"] == "dbosk@kth.se"
+@
+
+
+\subsection{Check if we need to log in to LADOK}
+
+There are two cases:
+\begin{enumerate}
+\item We get a 401 unauthorized for a [[ladok.se]] URL.
+\item We get redirected to the login server.
+\end{enumerate}
+Thus, we can detect this with either the return code or if the URL starts with 
+the URL to the login service, then we need to log in.
+However, as noted above, this only applies if we're not already underway with a 
+login.
+<<check if we're redirected to login server>>=
+if self.__logging_in:
+  return False
+elif response.status_code == requests.codes.unauthorized \
+     and "ladok.se" in response.url:
+  return True
+elif response.url.find(self.LOGIN_URL) == 0:
+  return True
+
+return False
+@
+
+\subsection{Log in to LADOK}\label{LogIntoLADOK}
+
+If we need to log in we have a few steps to do:
+<<log in to login server>>=
+<<start ladok login>>
+<<fetch return URL from LADOK's SeamlessAccess request>>
+<<fetch institution SAML URL from SeamlessAccess>>
+<<run return request with added institution SAML URL as entityID>>
+@ Once these steps are completed, the institution SAML and login handler should 
+take over.
+
+This takes place in the body of
+\begin{center}
+[[login(self, session, response, args=None, kwargs=None)]].
+\end{center}
+So those arguments are what we have to work with.
+
+We don't really need the [[/gui/loggain]] page, we simply start the login with 
+the following URL and it will trigger the steps needed.
+<<start ladok login>>=
+response = session.get("https://www.start.ladok.se/Shibboleth.sso/Login"
+                       "?target=https://www.start.ladok.se/gui/shiblogin")
+@
+
+That URL will redirect to SeamlessAccess.org.
+But instead of using that page, we use the [[weblogin.seamlessaccess]] module.
+The aim is to find the URL to the institution's SAML server, which we do later.
+Since we don't use it, we want to extract the return URL, because that contains 
+some session information for the SAML request later.
+<<fetch return URL from LADOK's SeamlessAccess request>>=
+parsed_url = urllib.parse.urlparse(response.url, allow_fragments=False)
+if "seamlessaccess.org" not in parsed_url.netloc:
+  raise weblogin.AuthenticationError(
+                  f"seamlessaccess.org not in {parsed_url.netloc}")
+
+return_url = urllib.parse.unquote(
+                        urllib.parse.parse_qs(parsed_url.query)["return"][0])
+@
+
+Now we actually fetch the SAML server URL, which is called by [[entityID]].
+<<fetch institution SAML URL from SeamlessAccess>>=
+if "{sha1}" in self.__institution:
+  entityID = sa.get_entity_data_by_id(self.__institution)["entityID"]
+else:
+  entityID = sa.find_entity_data_by_name(self.__institution)[0]["entityID"]
+@
+
+Finally, we append that to the return URL and make the request.
+<<run return request with added institution SAML URL as entityID>>=
+if "?" in return_url:
+  return_url += f"&entityID={entityID}"
+else:
+  return_url += f"?entityID={entityID}"
+
+ladok_response = session.get(return_url)
+@ We note that we can return the response to this last request.
+This response will be intercepted by the other login handlers and eventually 
+the real response will be returned to the original request.
+
