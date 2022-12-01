@@ -3,14 +3,35 @@
 Here we provide the module [[weblogin.kth]], which serves as an example of how 
 to write a login handler for use with [[weblogin.AutologinSession]].
 
-We need a class for KTH that detects logins at KTH.
-Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
-class.
+There are two login handlers needed for KTH.
+\begin{enumerate}
+\item The SAML handler, which handles the SAML protocol at KTH.
+\item The UG handler, which is the actual password-based authentication server.
+  The SAML service forwards to UG for password authentication.
+\end{enumerate}
+
+The module looks like this.
 <<kth.py>>=
 from lxml import html
 import requests
+import urllib.parse
 import weblogin
+import weblogin.seamlessaccess as sa
 
+<<UG login handler>>
+<<SAML login handler>>
+@ See the documentation of the SeamlessAccess module 
+[[weblogin.seamlessaccess]] in \cref{SeamlessAccessAPI}.
+We need that to make the [[weblogin.kth.SAMLlogin]] handler 
+(\cref{SAMLhandler}) more robust.
+
+
+\section{The UG login handler for KTH}\label{KTHhandler}
+
+We need a class for KTH that detects logins at KTH.
+Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
+class.
+<<UG login handler>>=
 class UGlogin(weblogin.AutologinHandler):
   """
   Login handler (weblogin.AutologinHandler) for UG logins, i.e. through 
@@ -18,17 +39,21 @@ class UGlogin(weblogin.AutologinHandler):
   """
   LOGIN_URL = "https://login.ug.kth.se"
   
-  def __init__(self, username, password, login_trigger_url=None):
+  def __init__(self, username, password, login_trigger_url=None,
+               rerun_requests=False):
     """
     Creates a login handler that automatically logs into KTH.
     - Requires username and password.
     - Optional `login_trigger_url` is a page that redirects to the login page,
       for instance, the API URLs don't redirect, but the UI URLs do.
+    - Optional `rerun_requests` specifies whether we want to rerun the original 
+      request that triggered authentication failure.
     """
     super().__init__()
     self.__username = username
     self.__password = password
     self.__login_trigger_url = login_trigger_url
+    self.__rerun_requests = rerun_requests
     self.__logging_in = False
 
   def need_login(self, response):
@@ -36,9 +61,12 @@ class UGlogin(weblogin.AutologinHandler):
     Checks a response to determine if logging in is needed,
     returns True if needed
     """
+    if self.__logging_in:
+      return False
+
     <<check if we're redirected to login server>>
 
-  def login(self, session, response, args=None, kwargs=None):
+  def login(self, session, response, args=[], kwargs={}):
     """
     Performs a login based on the response `response` from a request to session 
     `session`.
@@ -48,8 +76,12 @@ class UGlogin(weblogin.AutologinHandler):
     Raises an AuthenticationError exception if authentication fails.
     """
     self.__logging_in = True
-    <<log in to login server>>
+    <<log in to login server, produce new response>>
     self.__logging_in = False
+
+    if self.__rerun_requests and args:
+      return session.request(*args, **kwargs)
+    return final_response
 @
 
 We note that while we're logging in, we don't want those requests interrupted 
@@ -69,62 +101,40 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a 
 login.
 <<check if we're redirected to login server>>=
-if self.__logging_in:
-  return False
+if response.status_code == requests.codes.unauthorized and \
+          "kth.se" in response.url:
+  self.__rerun_requests = True
+  return True
+elif response.url.find(self.LOGIN_URL) == 0:
+  return True
 
-return (response.status_code == requests.codes.unauthorized and \
-          "kth.se" in response.url) or \
-       response.url.find(self.LOGIN_URL) == 0
+return False
 @
 
 \subsection{Log in at KTH}\label{LoginAtKTH}
 
-If we need to log in, we have two cases.
-Either we got a 401 response, because we called an API URL without being 
-authenticated.
-Or, we tried to access a UI URL which redirected to the login page.
+If we need to log in, we have three cases:
+\begin{enumerate}
+\item \label{UGunauthorized} Either we got a 401 response, because we called an 
+API URL without being authenticated.
+\item \label{UGloginPage} Or, we tried to access a UI URL which redirected to 
+the login page.
+\item \label{UGsaml} Or, we used SAML and were redirected to the login server 
+to handle a SAML request.
+(This will later result in \cref{UGloginPage}.)
+\end{enumerate}
 
-If we got the first case, we called an API URL which gave a 401 unauthorized 
-response, we want to use the [[login_trigger_url]] to get into the second case.
+If we got the first case (\cref{UGunauthorized}), we called an API URL which 
+gave a 401 unauthorized response, we want to use the [[login_trigger_url]] to 
+get into the second case (\cref{UGloginPage}).
 In the second case, response will contain the login page.
 We just need to fill the login form and submit it.
-<<log in to login server>>=
+In the third case (\cref{UGsaml}), we just want to continue the redirect.
+<<log in to login server, produce new response>>=
 if response.status_code == requests.codes.unauthorized:
   <<trigger redirect to login page>>
 else:
-  <<parse login page, post login form>>
-@
-
-Let's start with the simple case: parsing the login page and posting the login 
-form.
-This will contain the necessary redirects, so we just have to do it and then 
-the final response will redirect to the original page we were after.
-This means that we can simply return the
-<<parse login page, post login form>>=
-doc_tree = html.fromstring(response.text)
-form = doc_tree.xpath("//form[@id='loginForm']")[0]
-
-data = {}
-
-for variable in form.xpath("//input"):
-  if variable.value:
-    data[variable.name] = variable.value
-
-data["UserName"] = self.__username if "@ug.kth.se" in self.__username \
-                                   else self.__username + "@ug.kth.se"
-data["Password"] = self.__password
-data["Kmsi"] = True
-
-new_response = session.request(
-  form.method, f"{self.LOGIN_URL}/{form.action}",
-  data=data)
-
-if new_response.status_code != requests.codes.ok:
-  raise AuthenticationError(
-    f"authentication as {self.__username} to {new_response.url} failed: "
-    f"{new_response.text}")
-
-return new_response
+  <<parse login page, post login form, or handle SAML request>>
 @
 
 In the case where we just get the unauthorized, we have to simulate a redirect.
@@ -134,17 +144,73 @@ can log in using the method above.
 When we've done that, we must re-run the original request (the one that didn't 
 trigger a redirect) and return the reply from the new request.
 <<trigger redirect to login page>>=
-new_response = session.get(self.__login_trigger_url)
-login_response = self.login(session, new_response)
-request_response = session.request(*args, **kwargs)
-
-if request_response.status_code == requests.codes.unauthorized:
-  raise AuthenticationError(f"authentication apparently failed: "
-                            f"{login_response.text}")
-
-return request_response
+trigger_response = session.get(self.__login_trigger_url)
+login_response = self.login(session, trigger_response)
 @
 
+Now, the remaining case, we must distinguish between two cases.
+Fortunately, this is quite simple:
+If the login form is present, we fill it.
+Otherwise we assume it's the SAML case.
+<<parse login page, post login form, or handle SAML request>>=
+doc_tree = html.fromstring(response.text)
+login_form = doc_tree.xpath("//form[@id='loginForm']")
+if len(login_form) < 1:
+  <<handle the SAML request to UG>>
+else:
+  login_form = login_form[0]
+  <<handle UG login procedure>>
+@
+
+Let's start with the simple case: parsing the login page and posting the login 
+form.
+This will contain the necessary redirects, so we just have to do it and then 
+the final response will redirect to the original page we were after.
+This means that we can simply return the
+<<handle UG login procedure>>=
+data = {}
+
+for variable in login_form.xpath("//input"):
+  if variable.value:
+    data[variable.name] = variable.value
+
+data["UserName"] = self.__username if "@ug.kth.se" in self.__username \
+                                   else self.__username + "@ug.kth.se"
+data["Password"] = self.__password
+data["Kmsi"] = True
+
+login_response = session.request(
+  login_form.method, f"{self.LOGIN_URL}/{login_form.action}",
+  data=data)
+
+if login_response.status_code != requests.codes.ok:
+  raise weblogin.AuthenticationError(
+    f"authentication as {self.__username} to {login_response.url} failed: "
+    f"{login_response.text}")
+
+final_response = login_response
+@
+
+To handle the SAML request, we simply find the form, read all variables and 
+post the newly formed request.
+<<handle the SAML request to UG>>=
+form = doc_tree.xpath("//form")[0]
+
+data = {}
+for variable in form.xpath("//input"):
+  if variable.name:
+    data[variable.name] = variable.value or ""
+
+action_url = urllib.parse.urljoin(response.url, form.action)
+
+saml_response = session.request(form.method, action_url, data=data)
+
+if saml_response.status_code != requests.codes.ok:
+  raise weblogin.AuthenticationError(
+                      f"SAML error: not OK response: {saml_response.text}")
+
+final_response = saml_response
+@
 
 \subsection{Tests}
 
@@ -180,5 +246,120 @@ def test_get_api():
   response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
                     "?editableBySelf=true")
   assert response.status_code == requests.codes.ok and response.json()
+@
+
+
+\section{The SAML login handler for KTH}\label{SAMLhandler}
+
+The SAML handler is quite simple.
+It requires no login credentials, it just ensures that we forward requests 
+correctly.
+<<SAML login handler>>=
+class SAMLlogin(weblogin.AutologinHandler):
+  """
+  Login handler (weblogin.AutologinHandler) for SAML at KTH. This will relay to 
+  UG (login.ug.kth.se) which handles the password-based authentication.
+  """
+
+  def __init__(self, rerun_requests=False):
+    """
+    Creates a login handler that automatically handles the SAML requests used 
+    at KTH.
+    """
+    super().__init__()
+    self.__rerun_requests = rerun_requests
+    self.__logging_in = False
+
+  def need_login(self, response, ignore_logging_in=False):
+    """
+    Checks a response to determine if we should handle a request.
+    Returns True if needed.
+    """
+    if self.__logging_in:
+      return False
+
+    <<check if we're redirected to SAML server>>
+
+  def login(self, session, response, args=[], kwargs={}):
+    """
+    - Performs an action based on the response `response` from a request to 
+      session `session`.
+    - `args` and `kwargs` are the options from the request triggering the login 
+      procedure, this is so that we can redo that request after logging in.
+    - Raises an AuthenticationError exception on fails.
+    """
+    self.__logging_in = True
+    <<run SAML procedure, produce new response>>
+    self.__logging_in = False
+
+    if self.__rerun_requests and args:
+      return session.request(*args, **kwargs)
+    return saml_response
+@
+
+\subsection{Check if we're redirected to SAML server}
+
+The SAML URL gotten from SeamlessAccess.org is\footnote{%
+  As of 2022-11-30.
+} [[saml.sys.kth.se]], but the reverse lookup resolves to 
+[[saml-5.sys.kth.se]].
+So we will simply check if the domain contains both [[saml]] and 
+[[sys.kth.se]].
+<<check if we're redirected to SAML server>>=
+return "saml" in response.url and "sys.kth.se" in response.url
+@
+
+\subsection{Run KTH's SAML procedure}
+
+On the first stop in the sequence (contained in [[response]]), there is a form 
+that must be posted.
+A browser uses JavaScript to do this, we must do it manually:
+Find the form, fetch all values from the input tags, then post the form.
+All in all, we want to produce a new response from the server, 
+[[saml_response]] from above.
+
+We start by extracting any form.
+If there is no form, we simply proceed without doing anything.
+<<run SAML procedure, produce new response>>=
+doc_tree = html.fromstring(response.text)
+try:
+  form = doc_tree.xpath("//form")[0]
+except IndexError:
+  <<don't handle this request>>
+else:
+  <<extract form data and action>>
+  <<post form action>>
+@
+
+Now, it's easy to ignore this request.
+<<don't handle this request>>=
+pass
+@
+
+To extract the data, we simply traverse the inputs available in the form.
+<<extract form data and action>>=
+data = {}
+for variable in form.xpath("//input"):
+  if variable.name:
+    data[variable.name] = variable.value or ""
+
+action_url = urllib.parse.urljoin(response.url, form.action)
+@
+
+Now here is the trick:
+The form data extraction and submission above
+([[<<extract the form data and action>>]]) is so general, that it can handle 
+each of the several steps.
+However, we can't pretend that we are done and set
+[[self.__logging_in = False]], this will result in infinite recursion.
+(The requests will be intercepted before they happen, so we will never 
+proceed.)
+But we can recursively call this handler again and again until done.
+<<post form action>>=
+saml_response = session.request(form.method, action_url, data=data)
+
+if saml_response.status_code != requests.codes.ok:
+  raise weblogin.AuthenticationError(
+                      f"SAML error: not OK response: {saml_response.text}")
 @
 

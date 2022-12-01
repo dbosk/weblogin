@@ -62,6 +62,10 @@ class SSOlogin(weblogin.AutologinHandler):
     self.__logging_in = True
     <<log in to login server>>
     self.__logging_in = False
+
+    if args and response.history:
+      return session.request(*args, **kwargs)
+    return ladok_response
 @
 
 We note that while we're logging in, we don't want those requests interrupted 
@@ -83,26 +87,25 @@ We need two more handlers in this case, one for the SAML implementation
 institution ([[weblogin.kth.UGlogin]] below).
 <<test ladok.py>>=
 from weblogin import AutologinSession
-from weblogin import kth
-from weblogin import ladok
+from weblogin import kth, ladok
 import os
 import requests
 
 def test_get_user_info():
-  ladok = AutologinSession([
+  ls = AutologinSession([
       ladok.SSOlogin("KTH Royal Institute of Technology"),
       kth.SAMLlogin(),
       kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
     ])
 
   headers = {}
-  headers["Accept"] =    'application/vnd.ladok-resultat+json"
-  headers["Accept"] += ", application/vnd.ladok-kataloginformation+json"
-  headers["Accept"] += ", application/vnd.ladok-extra+json"
-  headers["Accept"] += ", application/json, text/plain"
+  headers["Accept"] =       "application/vnd.ladok-resultat+json"
+  headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
+  headers["Accept"] +=    ", application/vnd.ladok-extra+json"
+  headers["Accept"] +=    ", application/json, text/plain"
   headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
 
-  response = ladok.get(
+  response = ls.get(
     "https://www.start.ladok.se/gui/proxy"
       "/kataloginformation/anvandare/anvandarinformation",
     headers=headers
@@ -127,7 +130,7 @@ login.
 <<check if we're redirected to login server>>=
 if self.__logging_in:
   return False
-elif response.status_code == requests.codes.unauthorized
+elif response.status_code == requests.codes.unauthorized \
      and "ladok.se" in response.url:
   return True
 elif response.url.find(self.LOGIN_URL) == 0:
@@ -171,15 +174,15 @@ if "seamlessaccess.org" not in parsed_url.netloc:
   raise weblogin.AuthenticationError(
                   f"seamlessaccess.org not in {parsed_url.netloc}")
 
-return_url = urllib.parse.unescape(
-                        urllib.parse.parse_qs(parsed_url.query)["return"])
+return_url = urllib.parse.unquote(
+                        urllib.parse.parse_qs(parsed_url.query)["return"][0])
 @
 
 Now we actually fetch the SAML server URL, which is called by [[entityID]].
 <<fetch institution SAML URL from SeamlessAccess>>=
 if "{sha1}" in self.__institution:
   entityID = sa.get_entity_data_by_id(self.__institution)["entityID"]
-else
+else:
   entityID = sa.find_entity_data_by_name(self.__institution)[0]["entityID"]
 @
 
@@ -190,7 +193,7 @@ if "?" in return_url:
 else:
   return_url += f"?entityID={entityID}"
 
-return session.get(return_url)
+ladok_response = session.get(return_url)
 @ We note that we can return the response to this last request.
 This response will be intercepted by the other login handlers and eventually 
 the real response will be returned to the original request.
