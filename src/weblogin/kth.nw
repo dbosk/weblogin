@@ -348,8 +348,8 @@ action_url = urllib.parse.urljoin(response.url, form.action)
 
 Now here is the trick:
 The form data extraction and submission above
-([[<<extract the form data and action>>]]) is so general, that it can handle 
-each of the several steps.
+([[<<extract form data and action>>]]) is so general, that it can handle each 
+of the several steps.
 However, we can't pretend that we are done and set
 [[self.__logging_in = False]], this will result in infinite recursion.
 (The requests will be intercepted before they happen, so we will never 
