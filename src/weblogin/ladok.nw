@@ -48,6 +48,9 @@ class SSOlogin(weblogin.AutologinHandler):
     Checks a response to determine if logging in is needed,
     returns True if needed
     """
+    if self.__logging_in:
+      return False
+
     <<check if we're redirected to login server>>
 
   def login(self, session, response, args=None, kwargs=None):
@@ -98,23 +101,37 @@ def test_get_user_info():
       kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
     ])
 
-  headers = {}
-  headers["Accept"] =       "application/vnd.ladok-resultat+json"
-  headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
-  headers["Accept"] +=    ", application/vnd.ladok-extra+json"
-  headers["Accept"] +=    ", application/json, text/plain"
-  headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
-
-  response = ls.get(
-    "https://www.start.ladok.se/gui/proxy"
-      "/kataloginformation/anvandare/anvandarinformation",
-    headers=headers
-  )
-
-  assert response.status_code == requests.codes.ok \
-     and response.json()["Epost"] == "dbosk@kth.se"
+  <<make a request using ls>>
+  <<assert correctness of response>>
 @
 
+We will use an API request to test that this actually works.
+The API request in question is a request for data about the currently logged-in 
+user.
+This means that we must set up some headers and then make the request.
+<<make a request using ls>>=
+headers = {}
+headers["Accept"] =       "application/vnd.ladok-resultat+json"
+headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
+headers["Accept"] +=    ", application/vnd.ladok-extra+json"
+headers["Accept"] +=    ", application/json, text/plain"
+headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
+
+response = ls.get(
+  "https://www.start.ladok.se/gui/proxy"
+    "/kataloginformation/anvandare/anvandarinformation",
+  headers=headers
+)
+@
+
+Once we've made the request, we must assert that the response is what is 
+expected.
+In this case, the email entry should be the same as the author's institution 
+email address.
+<<assert correctness of response>>=
+assert response.status_code == requests.codes.ok \
+    and response.json()["Epost"] == "dbosk@kth.se"
+@
 
 \subsection{Check if we need to log in to LADOK}
 
@@ -128,12 +145,10 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a 
 login.
 <<check if we're redirected to login server>>=
-if self.__logging_in:
-  return False
-elif response.status_code == requests.codes.unauthorized \
+if response.status_code == requests.codes.unauthorized \
      and "ladok.se" in response.url:
   return True
-elif response.url.find(self.LOGIN_URL) == 0:
+elif response.url.startswith(self.LOGIN_URL):
   return True
 
 return False
