@@ -8,6 +8,24 @@ for redirects to the login service.
 If we detect a redirect to the login service, we automatically log in, then 
 return the new response.
 The logging in will become completely invisible, as if it never happened.
+
+We do this by inheriting from [[requests.Session]] and then overloading the 
+[[request]] method.
+This allows us to always intercept any request, make it (by using the original 
+method), check the response.
+If the response indicates that we need a login, we log in.
+To determine if we need to log in, we use login handlers (\cref{LoginHandler}).
+(See \cref{WebloginOverview}.)
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.8\columnwidth]{figs/weblogin.pdf}
+  \caption{An overview of how an HTTP request passes from the caller, through 
+  the requests library, to autologin, which runs the request through each login 
+  handler and finally returns the request response to the caller.}
+  \label{WebloginOverview}
+\end{figure}
+
 <<init.py>>=
 import requests
 
@@ -39,7 +57,7 @@ class AutologinSession(requests.Session):
     return response
 @
 
-\subsection{The [[AutologinHandler]] abstract class}
+\subsection{The [[AutologinHandler]] abstract class}\label{LoginHandler}
 
 A handler should derive from this class:
 <<classes>>=
