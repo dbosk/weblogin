@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "weblogin"
-version = "1.1"
+version = "1.2"
 description = "Automates logging into web UIs to access unofficial APIs"
 authors = ["Daniel Bosk <dbosk@kth.se>"]
 license = "MIT"
