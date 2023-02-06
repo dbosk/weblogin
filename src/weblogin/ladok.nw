@@ -377,7 +377,7 @@ ls = weblogin.AutologinSession([
 
 try:
   ls.get("https://www.start.ladok.se/gui/proxy"
-        "/kataloginformation/internal/anvandare/anvandarinformation")
+         "/kataloginformation/internal/anvandare/anvandarinformation")
 except weblogin.AuthenticationError as err:
   print("Authentication failed. These are the variables and values used: ")
   pprint(err.variables)
