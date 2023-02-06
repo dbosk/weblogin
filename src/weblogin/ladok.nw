@@ -337,6 +337,10 @@ Finally, we submit the form.
 We must extract the form method and the action to construct the URL for the 
 request.
 We also try to detect infinite loops, and in such cases, raise an exception.
+We also include [[data]] in the exception, as that contains all variables that 
+must be set correctly, and can, thus, be used to discover which variables to 
+set.
+(See \cref{DiscoverVariables}.)
 <<submit form>>=
 prev_url = ladok_response.url
 
@@ -344,54 +348,39 @@ action_url = urllib.parse.urljoin(ladok_response.url, form.action)
 ladok_response = session.request(form.method, action_url, data=data)
 
 if ladok_response.url == prev_url:
-  raise weblogin.AuthenticationError(f"infinite loop for "
+  err = weblogin.AuthenticationError(f"infinite loop for "
                                      f"URL: {action_url}\n"
                                      f"data: {data}")
+  err.variables = data
+  raise err
 @
 
-\subsection{Finding which variables to set}
+\subsection{Finding which variables to set}\label{DiscoverVariables}
 
 Since some universities might call the variables [[username]] and [[password]], 
 but others call them [[användarnamn]] and [[lösenord]], we need a way to 
 explore this.
-We will simply add an argument that, if set to [[True]], causes the code to 
-print the URLs and the variable names and values in the forms.
-<<SSOlogin args docs>>=
-- An optional argument `print_vars` (bool) that, when true, prints all 
-  variables of the forms for each page in the login process. Default value is 
-  false.
+Fortunately, we get that from the exception in [[<<submit form>>]].
 
-<<SSOlogin args>>=
-print_vars=False
-<<SSOlogin constructor>>=
-self.__print_vars = print_vars
-@
-
-Then all we need to do is to append to [[<<submit form>>]] an if-statement that 
-prints all data we want when necessary.
-<<submit form>>=
-if self.__print_vars:
-  print(f"URL = {prev_url}")
-  pprint(data)
-@
-
-We can use it like this (this is for KTH).
+We will now illustrate how to use it.
+We can use it like this for KTH.
 Note that we must make a request, but we don't care about the result of that 
 request (it will fail anyway).
 \begin{pyblock}
+from pprint import pprint
 import weblogin
 import weblogin.ladok
 
 ls = weblogin.AutologinSession([
-    weblogin.ladok.SSOlogin("KTH Royal Institute of Technology",
-                            print_vars=True)
+    weblogin.ladok.SSOlogin("KTH Royal Institute of Technology")
   ])
 
 try:
   ls.get("https://www.start.ladok.se/gui/proxy"
         "/kataloginformation/internal/anvandare/anvandarinformation")
-except weblogin.AuthenticationError:
-  pass
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
 \end{pyblock}
 Then the output will be like this:
 \printpythontex[verbatim]
@@ -405,15 +394,15 @@ import weblogin.ladok
 print(r"\begin{verbatim}")
 
 ls = weblogin.AutologinSession([
-    weblogin.ladok.SSOlogin("Chalmers",
-                            print_vars=True)
+    weblogin.ladok.SSOlogin("Chalmers")
   ])
 
 try:
   ls.get("https://www.start.ladok.se/gui/proxy"
         "/kataloginformation/internal/anvandare/anvandarinformation")
-except weblogin.AuthenticationError:
-  pass
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
 
 print(r"\end{verbatim}")
 \end{pycode}
@@ -425,15 +414,15 @@ import weblogin.ladok
 print(r"\begin{verbatim}")
 
 ls = weblogin.AutologinSession([
-    weblogin.ladok.SSOlogin("Mid Sweden University",
-                            print_vars=True)
+    weblogin.ladok.SSOlogin("Mid Sweden University")
   ])
 
 try:
   ls.get("https://www.start.ladok.se/gui/proxy"
         "/kataloginformation/internal/anvandare/anvandarinformation")
-except weblogin.AuthenticationError:
-  pass
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
 
 print(r"\end{verbatim}")
 \end{pycode}
