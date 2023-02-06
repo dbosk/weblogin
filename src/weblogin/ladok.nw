@@ -267,7 +267,7 @@ def test_no_KTH_specific_handler():
   ls = AutologinSession([
       ladok.SSOlogin("KTH Royal Institute of Technology",
                      vars={
-                       "username": os.environ["KTH_LOGIN"],
+                       "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
                        "password": os.environ["KTH_PASSWD"]
                      })
     ])
@@ -280,7 +280,8 @@ constructor.
 <<SSOlogin args docs>>=
 - An optional argument `vars` containing keys matching variables of the web 
   page forms whose values should be substituted for the values in the `vars` 
-  dictionary.
+  dictionary. Note that the keys should be casefolded (lower case), since we 
+  use `.casefold` to match variable names.
 @
 We use the default value of [[None]], since an empty dictionary can cause 
 unintended consequences due to its mutability\footnote{%
@@ -290,7 +291,7 @@ unintended consequences due to its mutability\footnote{%
 <<SSOlogin args>>=
 vars=None
 <<SSOlogin constructor>>=
-self.__vars = vars
+self.__vars = vars or {}
 @
 
 Now, if the other login handlers intercepted the requests, the final URL will 
@@ -324,8 +325,9 @@ data = {}
 
 for var in form.xpath("//input"):
   if var.name:
-    if var.name in self.__vars:
-      data[var.name] = self.__vars[var.name]
+    varname_casefold = var.name.casefold()
+    if varname_casefold in self.__vars:
+      data[var.name] = self.__vars[varname_casefold]
     else:
       data[var.name] = var.value or ""
 @
@@ -333,7 +335,15 @@ for var in form.xpath("//input"):
 Finally, we submit the form.
 We must extract the form method and the action to construct the URL for the 
 request.
+We also try to detect infinite loops, and in such cases, raise an exception.
 <<submit form>>=
+prev_url = ladok_response.url
+
 action_url = urllib.parse.urljoin(ladok_response.url, form.action)
 ladok_response = session.request(form.method, action_url, data=data)
-@
+
+if ladok_response.url == prev_url:
+  raise weblogin.AuthenticationError(f"infinite loop for "
+                                     f"URL: {action_url}\n"
+                                     f"data: {data}")
+
