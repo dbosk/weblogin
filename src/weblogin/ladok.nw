@@ -24,6 +24,7 @@ Then we implement the missing methods in the [[weblogin.AutologinHandler]]
 class.
 <<ladok.py>>=
 from lxml import html
+from pprint import pprint
 import requests
 import weblogin
 import weblogin.seamlessaccess as sa
@@ -289,7 +290,7 @@ unintended consequences due to its mutability\footnote{%
   \url{https://www.inspiredpython.com/article/watch-out-for-mutable-defaults-in-function-arguments}.
 }.
 <<SSOlogin args>>=
-vars=None
+vars=None,
 <<SSOlogin constructor>>=
 self.__vars = vars or {}
 @
@@ -346,4 +347,94 @@ if ladok_response.url == prev_url:
   raise weblogin.AuthenticationError(f"infinite loop for "
                                      f"URL: {action_url}\n"
                                      f"data: {data}")
+@
+
+\subsection{Finding which variables to set}
+
+Since some universities might call the variables [[username]] and [[password]], 
+but others call them [[användarnamn]] and [[lösenord]], we need a way to 
+explore this.
+We will simply add an argument that, if set to [[True]], causes the code to 
+print the URLs and the variable names and values in the forms.
+<<SSOlogin args docs>>=
+- An optional argument `discover_vars` (bool) that, when true, prints all 
+  variables of the forms for each page in the login process. Default value is 
+  false.
+
+<<SSOlogin args>>=
+discover_vars=False
+<<SSOlogin constructor>>=
+self.__discover_vars = discover_vars
+@
+
+Then all we need to do is to append to [[<<submit form>>]] an if-statement that 
+prints all data we want when necessary.
+<<submit form>>=
+if self.__discover_vars:
+  print(f"URL = {prev_url}")
+  pprint(data)
+@
+
+We can use it like this (this is for KTH).
+Note that we must make a request, but we don't care about the result of that 
+request (it will fail anyway).
+\begin{pyblock}
+import weblogin
+import weblogin.ladok
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("KTH Royal Institute of Technology",
+                            discover_vars=True)
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+        "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError:
+  pass
+\end{pyblock}
+Then the output will be like this:
+\printpythontex[verbatim]
+
+We can redo this experiment for two more universities.
+First, Chalmers:
+\begin{pycode}
+import weblogin
+import weblogin.ladok
+
+print(r"\begin{verbatim}")
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("Chalmers",
+                            discover_vars=True)
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+        "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError:
+  pass
+
+print(r"\end{verbatim}")
+\end{pycode}
+Second, Mid Sweden University:
+\begin{pycode}
+import weblogin
+import weblogin.ladok
+
+print(r"\begin{verbatim}")
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("Mid Sweden University",
+                            discover_vars=True)
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+        "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError:
+  pass
+
+print(r"\end{verbatim}")
+\end{pycode}
 
