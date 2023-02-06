@@ -357,20 +357,20 @@ explore this.
 We will simply add an argument that, if set to [[True]], causes the code to 
 print the URLs and the variable names and values in the forms.
 <<SSOlogin args docs>>=
-- An optional argument `discover_vars` (bool) that, when true, prints all 
+- An optional argument `print_vars` (bool) that, when true, prints all 
   variables of the forms for each page in the login process. Default value is 
   false.
 
 <<SSOlogin args>>=
-discover_vars=False
+print_vars=False
 <<SSOlogin constructor>>=
-self.__discover_vars = discover_vars
+self.__print_vars = print_vars
 @
 
 Then all we need to do is to append to [[<<submit form>>]] an if-statement that 
 prints all data we want when necessary.
 <<submit form>>=
-if self.__discover_vars:
+if self.__print_vars:
   print(f"URL = {prev_url}")
   pprint(data)
 @
@@ -384,7 +384,7 @@ import weblogin.ladok
 
 ls = weblogin.AutologinSession([
     weblogin.ladok.SSOlogin("KTH Royal Institute of Technology",
-                            discover_vars=True)
+                            print_vars=True)
   ])
 
 try:
@@ -406,7 +406,7 @@ print(r"\begin{verbatim}")
 
 ls = weblogin.AutologinSession([
     weblogin.ladok.SSOlogin("Chalmers",
-                            discover_vars=True)
+                            print_vars=True)
   ])
 
 try:
@@ -426,7 +426,7 @@ print(r"\begin{verbatim}")
 
 ls = weblogin.AutologinSession([
     weblogin.ladok.SSOlogin("Mid Sweden University",
-                            discover_vars=True)
+                            print_vars=True)
   ])
 
 try:
