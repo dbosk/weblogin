@@ -129,7 +129,7 @@ headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
 
 response = ls.get(
   "https://www.start.ladok.se/gui/proxy"
-    "/kataloginformation/anvandare/anvandarinformation",
+    "/kataloginformation/internal/anvandare/anvandarinformation",
   headers=headers
 )
 @
