@@ -9,11 +9,22 @@ As LADOK supports logging in using SSO from all Swedish universities, we will
 use this handler in conjunction with a login handler for a university (for 
 instance the ones for KTH in \cref{KTHhandler,SAMLhandler}).
 
+However, it turns out, that most handlers for the university-specific login 
+services are quite similar.
+And they are all on domains different from LADOK.
+This allows us to actually write a very general login handler that should be 
+able to handle almost any university.
+If this general-purpose handler doesn't work for a particular university, we 
+can always write a handler for that university.
+That way, that handler will intercept the right requests and handle them, 
+before returning to this general-purpose code.
+
 We need a class for LADOK that detects logins to LADOK.
 Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
 class.
 <<ladok.py>>=
 from lxml import html
+from pprint import pprint
 import requests
 import weblogin
 import weblogin.seamlessaccess as sa
@@ -23,31 +34,32 @@ class SSOlogin(weblogin.AutologinHandler):
   """
   Login handler (weblogin.AutologinHandler) for LADOK logins.
   """
-  LOGIN_URL = "https://www.start.ladok.se/gui/loggain"
+  <<SSOlogin constants>>
   
   def __init__(self,
       institution,
-      login_trigger_url="https://www.start.ladok.se/gui/"):
+      <<SSOlogin args>>):
     """
     Creates a login handler that automates the LADOK part of authentication.
+
     - Requires `institution`. A string identifying the instutution at 
       SeamlessAccess.org.
-    - Optional `login_trigger_url` is a page that redirects to the login page,
-      for instance, the API URLs don't redirect, but the UI URLs do.
 
-    This login handler must be used in conjunction with a university login 
-    handler.
+    <<SSOlogin args docs>>
     """
     super().__init__()
     self.__institution = institution
-    self.__login_trigger_url = login_trigger_url
     self.__logging_in = False
+    <<SSOlogin constructor>>
 
   def need_login(self, response):
     """
     Checks a response to determine if logging in is needed,
     returns True if needed
     """
+    if self.__logging_in:
+      return False
+
     <<check if we're redirected to login server>>
 
   def login(self, session, response, args=None, kwargs=None):
@@ -98,23 +110,39 @@ def test_get_user_info():
       kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
     ])
 
-  headers = {}
-  headers["Accept"] =       "application/vnd.ladok-resultat+json"
-  headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
-  headers["Accept"] +=    ", application/vnd.ladok-extra+json"
-  headers["Accept"] +=    ", application/json, text/plain"
-  headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
+  <<make a request using ls>>
+  <<assert correctness of response>>
 
-  response = ls.get(
-    "https://www.start.ladok.se/gui/proxy"
-      "/kataloginformation/anvandare/anvandarinformation",
-    headers=headers
-  )
-
-  assert response.status_code == requests.codes.ok \
-     and response.json()["Epost"] == "dbosk@kth.se"
+<<more test functions>>
 @
 
+We will use an API request to test that this actually works.
+The API request in question is a request for data about the currently logged-in 
+user.
+This means that we must set up some headers and then make the request.
+<<make a request using ls>>=
+headers = {}
+headers["Accept"] =       "application/vnd.ladok-resultat+json"
+headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
+headers["Accept"] +=    ", application/vnd.ladok-extra+json"
+headers["Accept"] +=    ", application/json, text/plain"
+headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
+
+response = ls.get(
+  "https://www.start.ladok.se/gui/proxy"
+    "/kataloginformation/internal/anvandare/anvandarinformation",
+  headers=headers
+)
+@
+
+Once we've made the request, we must assert that the response is what is 
+expected.
+In this case, the email entry should be the same as the author's institution 
+email address.
+<<assert correctness of response>>=
+assert response.status_code == requests.codes.ok \
+    and response.json()["Epost"] == "dbosk@kth.se"
+@
 
 \subsection{Check if we need to log in to LADOK}
 
@@ -128,15 +156,16 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a 
 login.
 <<check if we're redirected to login server>>=
-if self.__logging_in:
-  return False
-elif response.status_code == requests.codes.unauthorized \
+if response.status_code == requests.codes.unauthorized \
      and "ladok.se" in response.url:
   return True
-elif response.url.find(self.LOGIN_URL) == 0:
+elif response.url.startswith(self.LOGIN_URL):
   return True
 
 return False
+
+<<SSOlogin constants>>=
+LOGIN_URL = "https://www.start.ladok.se/gui/loggain"
 @
 
 \subsection{Log in to LADOK}\label{LogIntoLADOK}
@@ -187,6 +216,9 @@ else:
 @
 
 Finally, we append that to the return URL and make the request.
+We note that we can return the response to this last request.
+This response will be intercepted by the other login handlers and eventually 
+the real response will be returned to the original request.
 <<run return request with added institution SAML URL as entityID>>=
 if "?" in return_url:
   return_url += f"&entityID={entityID}"
@@ -194,7 +226,204 @@ else:
   return_url += f"?entityID={entityID}"
 
 ladok_response = session.get(return_url)
-@ We note that we can return the response to this last request.
-This response will be intercepted by the other login handlers and eventually 
-the real response will be returned to the original request.
+@
+
+\subsection{Log into any university}
+
+Now, here is the trick.
+If we don't have any other [[AutologinHandler]] objects handling the logins to 
+the specific university, the [[ladok_response]] of
+[[<<run return request with added institution SAML URL as entityID>>]] will 
+contain a page in the login process of the university.
+These pages just contain [[<form>...<input>...</input>...</form>]] elements 
+that need to be posted.
+In most cases, we just need the default values.
+The only time we need to add values, are for the username and password fields.
+Fortunately, those are most often called [[username]] and [[password]] by the 
+universities, so we can look for them and fill them when they show up.
+
+However, we can do better.
+We can take a dictionary where the keys match variable names in these forms, if 
+we have a match, we use the value as value when we post the form.
+This way, for most universities we can simply do:
+\begin{minted}{json}
+{
+  "username": "dbosk",
+  "password": "my secret password"
+}
+\end{minted}
+But for any university login portal that uses other variable names, we can 
+simply change the keys in the dictionary:
+\begin{minted}{json}
+{
+  "användarnamn": "dbosk",
+  "lösenord": "my secret password"
+}
+\end{minted}
+
+We can modify the test above to skip the KTH-specific handlers that we 
+added, otherwise it remains the same.
+<<more test functions>>=
+def test_no_KTH_specific_handler():
+  ls = AutologinSession([
+      ladok.SSOlogin("KTH Royal Institute of Technology",
+                     vars={
+                       "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                       "password": os.environ["KTH_PASSWD"]
+                     })
+    ])
+
+  <<make a request using ls>>
+  <<assert correctness of response>>
+@
+Now that design requires an additional argument (a default argument) to the 
+constructor.
+<<SSOlogin args docs>>=
+- An optional argument `vars` containing keys matching variables of the web 
+  page forms whose values should be substituted for the values in the `vars` 
+  dictionary. Note that the keys should be casefolded (lower case), since we 
+  use `.casefold` to match variable names.
+@
+We use the default value of [[None]], since an empty dictionary can cause 
+unintended consequences due to its mutability\footnote{%
+  See for instance 
+  \url{https://www.inspiredpython.com/article/watch-out-for-mutable-defaults-in-function-arguments}.
+}.
+<<SSOlogin args>>=
+vars=None,
+<<SSOlogin constructor>>=
+self.__vars = vars or {}
+@
+
+Now, if the other login handlers intercepted the requests, the final URL will 
+be one on the [[ladok.se]] domain.
+This means that we can just iterate until that happens.
+Whenever we encounter a form, we simply fill it and post it (or get, whatever 
+method is specified by the form).
+<<log in to login server>>=
+while "ladok.se" not in \
+    urllib.parse.urlparse(ladok_response.url, allow_fragments=False).netloc:
+  <<find form>>
+  <<extract data and substitute variables>>
+  <<submit form>>
+@
+
+Now, to find the form we must parse it.
+Then we'll use XPath to find it.
+<<find form>>=
+doc_tree = html.fromstring(ladok_response.text)
+try:
+  form = doc_tree.xpath("//form")[0]
+except IndexError:
+  raise AuthenticationError(f"Got page without any form and not on LADOK: "
+                            f"{ladok_response}")
+@
+
+Next, we want to extract default values from the forms variables and substitute 
+if needed.
+<<extract data and substitute variables>>=
+data = {}
+
+for var in form.xpath("//input"):
+  if var.name:
+    varname_casefold = var.name.casefold()
+    if varname_casefold in self.__vars:
+      data[var.name] = self.__vars[varname_casefold]
+    else:
+      data[var.name] = var.value or ""
+@
+
+Finally, we submit the form.
+We must extract the form method and the action to construct the URL for the 
+request.
+We also try to detect infinite loops, and in such cases, raise an exception.
+We also include [[data]] in the exception, as that contains all variables that 
+must be set correctly, and can, thus, be used to discover which variables to 
+set.
+(See \cref{DiscoverVariables}.)
+<<submit form>>=
+prev_url = ladok_response.url
+
+action_url = urllib.parse.urljoin(ladok_response.url, form.action)
+ladok_response = session.request(form.method, action_url, data=data)
+
+if ladok_response.url == prev_url:
+  err = weblogin.AuthenticationError(f"infinite loop for "
+                                     f"URL: {action_url}\n"
+                                     f"data: {data}")
+  err.variables = data
+  raise err
+@
+
+\subsection{Finding which variables to set}\label{DiscoverVariables}
+
+Since some universities might call the variables [[username]] and [[password]], 
+but others call them [[användarnamn]] and [[lösenord]], we need a way to 
+explore this.
+Fortunately, we get that from the exception in [[<<submit form>>]].
+
+We will now illustrate how to use it.
+We can use it like this for KTH.
+Note that we must make a request, but we don't care about the result of that 
+request (it will fail anyway).
+\begin{pyblock}
+from pprint import pprint
+import weblogin
+import weblogin.ladok
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("KTH Royal Institute of Technology")
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+         "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
+\end{pyblock}
+Then the output will be like this:
+\printpythontex[verbatim]
+
+We can redo this experiment for two more universities.
+First, Chalmers:
+\begin{pycode}
+import weblogin
+import weblogin.ladok
+
+print(r"\begin{verbatim}")
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("Chalmers")
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+        "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
+
+print(r"\end{verbatim}")
+\end{pycode}
+Second, Mid Sweden University:
+\begin{pycode}
+import weblogin
+import weblogin.ladok
+
+print(r"\begin{verbatim}")
+
+ls = weblogin.AutologinSession([
+    weblogin.ladok.SSOlogin("Mid Sweden University")
+  ])
+
+try:
+  ls.get("https://www.start.ladok.se/gui/proxy"
+        "/kataloginformation/internal/anvandare/anvandarinformation")
+except weblogin.AuthenticationError as err:
+  print("Authentication failed. These are the variables and values used: ")
+  pprint(err.variables)
+
+print(r"\end{verbatim}")
+\end{pycode}
 

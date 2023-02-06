@@ -8,6 +8,10 @@ PYTHONTEXFLAGS=	--interpreter "python:poetry run python3"
 weblogin.pdf: preamble.tex abstract.tex ../LICENSE
 weblogin.pdf: intro.tex
 
+FIGS+=		figs/weblogin.pdf
+
+weblogin.pdf: ${FIGS}
+
 weblogin.pdf: ../src/weblogin/init.tex
 weblogin.pdf: ../src/weblogin/kth.tex
 weblogin.pdf: ../src/weblogin/seamlessaccess.tex
@@ -20,16 +24,21 @@ weblogin.pdf: ../src/weblogin
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
 
+${FIGS}::
+	${MAKE} -C $(dir $@) $(notdir $@)
+
 
 .PHONY: clean
 clean:
 	${RM} weblogin.pdf
 	${MAKE} -C ../src/weblogin clean
+	${MAKE} -C figs clean
 
 .PHONY: distclean
 distclean:
 	${RM} -Rf __pycache__
 	${MAKE} -C ../src/weblogin distclean
+	${MAKE} -C figs distclean
 
 
 
