@@ -98,17 +98,17 @@ We need two more handlers in this case, one for the SAML implementation
 ([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the 
 institution ([[weblogin.kth.UGlogin]] below).
 <<test ladok.py>>=
-from weblogin import AutologinSession
+import weblogin
 from weblogin import kth, ladok
 import os
 import requests
 
 def test_get_user_info():
-  ls = AutologinSession([
-      ladok.SSOlogin("KTH Royal Institute of Technology"),
-      kth.SAMLlogin(),
-      kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
-    ])
+  ls = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology"),
+        kth.SAMLlogin(),
+        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+      ])
 
   <<make a request using ls>>
   <<assert correctness of response>>
@@ -265,17 +265,37 @@ We can modify the test above to skip the KTH-specific handlers that we
 added, otherwise it remains the same.
 <<more test functions>>=
 def test_no_KTH_specific_handler():
-  ls = AutologinSession([
-      ladok.SSOlogin("KTH Royal Institute of Technology",
-                     vars={
-                       "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
-                       "password": os.environ["KTH_PASSWD"]
-                     })
-    ])
+  ls = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology",
+                         vars={
+                           "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                           "password": os.environ["KTH_PASSWD"]
+                         })
+        ])
 
   <<make a request using ls>>
   <<assert correctness of response>>
 @
+
+We would also like to test if we can detect failed authentication.
+<<more test functions>>=
+def test_wrong_credentials():
+  ls = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology",
+                         vars={
+                           "username": "invalid user",
+                           "password": "this is the wrong password"
+                         })
+        ])
+
+  try:
+    <<make a request using ls>>
+  except weblogin.AuthenticationError:
+    assert True
+  else:
+    assert False
+@
+
 Now that design requires an additional argument (a default argument) to the 
 constructor.
 <<SSOlogin args docs>>=

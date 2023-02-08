@@ -188,6 +188,13 @@ if login_response.status_code != requests.codes.ok:
     f"authentication as {self.__username} to {login_response.url} failed: "
     f"{login_response.text}")
 
+login_doc_tree = html.fromstring(login_response.text)
+login_form = login_doc_tree.xpath("//form[@id='loginForm']")
+if len(login_form) > 0:
+  raise weblogin.AuthenticationError(
+    f"authentication as {self.__username} failed (redirect to same page), "
+    f"probably wrong username or password.")
+
 final_response = login_response
 @
 
@@ -224,28 +231,47 @@ the redirect ourselves using the [[login_trigger_url]].
 
 The two tests follow.
 <<test kth.py>>=
-from weblogin import AutologinSession
+import weblogin
 from weblogin.kth import UGlogin
 import os
 import requests
 
 def test_get_ui():
-  ug = AutologinSession([
-    UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
-            "https://app.kth.se/ug-gruppeditor/")
+  ug = weblogin.AutologinSession([
+      UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
+              "https://app.kth.se/ug-gruppeditor/")
     ])
   response = ug.get("https://app.kth.se/ug-gruppeditor/")
   assert response.status_code == requests.codes.ok and \
     response.url.find("https://app.kth.se") == 0
 
 def test_get_api():
-  ug = AutologinSession([
-    UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
-            "https://app.kth.se/ug-gruppeditor/")
+  ug = weblogin.AutologinSession([
+      UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
+              "https://app.kth.se/ug-gruppeditor/")
     ])
   response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
                     "?editableBySelf=true")
   assert response.status_code == requests.codes.ok and response.json()
+
+<<more test functions>>
+@
+
+Now, we would also like to test authentication errors.
+<<more test functions>>=
+def test_auth_fail():
+  ug = weblogin.AutologinSession([
+      UGlogin("invalid user", "wrong password",
+              "https://app.kth.se/ug-gruppeditor/")
+    ])
+
+  try:
+    response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
+                      "?editableBySelf=true")
+  except weblogin.AuthenticationError:
+    assert True
+  else:
+    assert False
 @
 
 
