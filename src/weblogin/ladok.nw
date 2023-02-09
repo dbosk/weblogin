@@ -113,6 +113,18 @@ def test_get_user_info():
   <<make a request using ls>>
   <<assert correctness of response>>
 
+def test_multiple_calls():
+  ls = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology"),
+        kth.SAMLlogin(),
+        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+      ])
+
+  <<make a request using ls>>
+  <<assert correctness of response>>
+  <<make a request using ls>>
+  <<assert correctness of response>>
+
 <<more test functions>>
 @
 
@@ -273,6 +285,20 @@ def test_no_KTH_specific_handler():
                          })
         ])
 
+  <<make a request using ls>>
+  <<assert correctness of response>>
+
+def test_SSOlogin_multiple_requests():
+  ls = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology",
+                         vars={
+                           "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                           "password": os.environ["KTH_PASSWD"]
+                         })
+        ])
+
+  <<make a request using ls>>
+  <<assert correctness of response>>
   <<make a request using ls>>
   <<assert correctness of response>>
 @
