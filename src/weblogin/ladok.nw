@@ -34,7 +34,6 @@ class SSOlogin(weblogin.AutologinHandler):
   """
   Login handler (weblogin.AutologinHandler) for LADOK logins.
   """
-  <<SSOlogin constants>>
   
   def __init__(self,
       institution,
@@ -133,18 +132,23 @@ The API request in question is a request for data about the currently logged-in
 user.
 This means that we must set up some headers and then make the request.
 <<make a request using ls>>=
-headers = {}
-headers["Accept"] =       "application/vnd.ladok-resultat+json"
-headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
-headers["Accept"] +=    ", application/vnd.ladok-extra+json"
-headers["Accept"] +=    ", application/json, text/plain"
-headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
+<<set up headers for API request>>
 
 response = ls.get(
   "https://www.start.ladok.se/gui/proxy"
     "/kataloginformation/internal/anvandare/anvandarinformation",
   headers=headers
 )
+@
+
+The headers are then:
+<<set up headers for API request>>=
+headers = {}
+headers["Accept"] =       "application/vnd.ladok-resultat+json"
+headers["Accept"] +=    ", application/vnd.ladok-kataloginformation+json"
+headers["Accept"] +=    ", application/vnd.ladok-extra+json"
+headers["Accept"] +=    ", application/json, text/plain"
+headers["Content-Type"] = "application/vnd.ladok-kataloginformation+json"
 @
 
 Once we've made the request, we must assert that the response is what is 
@@ -171,14 +175,53 @@ login.
 if response.status_code == requests.codes.unauthorized \
      and "ladok.se" in response.url:
   return True
-elif response.url.startswith(self.LOGIN_URL):
+elif response.url.startswith(self.__login_url):
   return True
 
 return False
-
-<<SSOlogin constants>>=
-LOGIN_URL = "https://www.start.ladok.se/gui/loggain"
 @
+
+The login URL is different for the test system and the production system.
+We want to be able to handle both.
+We add a default argument to the constructor, we default to the production 
+system URL.
+<<SSOlogin args>>=
+test_environment=False,
+
+<<SSOlogin constructor>>=
+if test_environment:
+  self.__base_url = "https://www.test.ladok.se"
+else:
+  self.__base_url = "https://www.start.ladok.se"
+
+self.__login_url = f"{self.__base_url}/gui/loggain"
+@
+
+We test if this works.
+<<more test functions>>=
+def test_test_environment():
+  ls = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology",
+                       test_environment=True),
+        kth.SAMLlogin(),
+        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+      ])
+
+  <<set up headers for API request>>
+  <<make a request to the test environment using ls>>
+  <<assert correctness of response>>
+@
+
+Now, this request is going to be very similar to
+[[<<make a request using ls>>]] from above, we just change the URL.
+<<make a request to the test environment using ls>>=
+response = ls.get(
+  "https://www.test.ladok.se/gui/proxy"
+    "/kataloginformation/internal/anvandare/anvandarinformation",
+  headers=headers
+)
+@
+
 
 \subsection{Log in to LADOK}\label{LogIntoLADOK}
 
@@ -200,8 +243,8 @@ So those arguments are what we have to work with.
 We don't really need the [[/gui/loggain]] page, we simply start the login with 
 the following URL and it will trigger the steps needed.
 <<start ladok login>>=
-response = session.get("https://www.start.ladok.se/Shibboleth.sso/Login"
-                       "?target=https://www.start.ladok.se/gui/shiblogin")
+response = session.get(f"{self.__base_url}/Shibboleth.sso/Login"
+                       f"?target={self.__base_url}/gui/shiblogin")
 @
 
 That URL will redirect to SeamlessAccess.org.
@@ -310,6 +353,20 @@ def test_SSOlogin_multiple_requests():
   <<make a request using ls>>
   <<assert correctness of response>>
   <<make a request using ls>>
+  <<assert correctness of response>>
+
+def test_test_environment_SSOlogin():
+  ls = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology",
+                       vars={
+                         "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                         "password": os.environ["KTH_PASSWD"]
+                       },
+                       test_environment=True)
+      ])
+
+  <<set up headers for API request>>
+  <<make a request to the test environment using ls>>
   <<assert correctness of response>>
 @
 
