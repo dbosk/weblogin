@@ -220,11 +220,21 @@ return_url = urllib.parse.unquote(
 @
 
 Now we actually fetch the SAML server URL, which is called by [[entityID]].
+If there is an error here, we'd like to know what caused the error.
+So we'd like the exceptions to contain the data that caused the error.
 <<fetch institution SAML URL from SeamlessAccess>>=
-if "{sha1}" in self.__institution:
-  entityID = sa.get_entity_data_by_id(self.__institution)["entityID"]
-else:
-  entityID = sa.find_entity_data_by_name(self.__institution)[0]["entityID"]
+try:
+  if "{sha1}" in self.__institution:
+    sa_data = sa.get_entity_data_by_id(self.__institution)
+  else:
+    sa_data = sa.find_entity_data_by_name(self.__institution)
+    sa_data = sa_data[0]
+
+  entityID = sa_data["entityID"]
+except IndexError:
+  raise ValueError(f"{self.__institution} didn't give any match.")
+except KeyError:
+  raise Exception(f"SeamlessAccess.org returned unexpected result: {sa_data}")
 @
 
 Finally, we append that to the return URL and make the request.
