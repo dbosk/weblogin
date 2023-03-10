@@ -105,7 +105,7 @@ if response.status_code == requests.codes.unauthorized and \
           "kth.se" in response.url:
   self.__rerun_requests = True
   return True
-elif response.url.find(self.LOGIN_URL) == 0:
+elif response.url.startswith(self.LOGIN_URL):
   return True
 
 return False
@@ -243,7 +243,7 @@ def test_get_ui():
     ])
   response = ug.get("https://app.kth.se/ug-gruppeditor/")
   assert response.status_code == requests.codes.ok and \
-    response.url.find("https://app.kth.se") == 0
+    response.url.startswith("https://app.kth.se")
 
 def test_get_api():
   ug = weblogin.AutologinSession([
