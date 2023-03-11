@@ -8,7 +8,11 @@ version=$(shell sed -n 's/^ *version *= *\"\([^\"]\+\)\"/\1/p' pyproject.toml)
 
 .PHONY: all publish
 
-all:
+all: intro.md
+
+intro.md: doc/intro.tex
+	pandoc -o $@ $<
+	${EDITOR} $@
 
 publish: all
 	poetry build
@@ -24,3 +28,4 @@ distclean:
 
 INCLUDE_MAKEFILES=makefiles
 include ${INCLUDE_MAKEFILES}/subdir.mk
+include ${INCLUDE_MAKEFILES}/doc.mk

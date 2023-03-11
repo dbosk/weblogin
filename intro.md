@@ -1,3 +1,6 @@
+Introduction
+============
+
 We want to use APIs from web UIs that require login. What we want to do
 is to set up a session, login and then use the API of the page. The
 reason we want to do this is to use existing APIs. For instance, the
@@ -6,19 +9,21 @@ user group management service at KTH, see
 use the service, track the requests in the browser's developer tools.
 Then we can simply make the same requests from Python.
 
-![Screenshot of the KTH UG Editor with Firefox's Developer Tools open,
-showing network requests made.](https://github.com/dbosk/weblogin/raw/main/doc/figs/ug.png){#UGEditor width="\\columnwidth"}
+[![Screenshot of the KTH UG Editor with Firefox's Developer Tools open, showing network requests made.](https://github.com/dbosk/weblogin/raw/main/doc/figs/ug.png)](#UGEditor)
 
-For instance, we can redo the request in
-[1](#UGEditor){reference-type="ref" reference="UGEditor"} like this:
+For instance, we can redo the request in [Figure 1](#UGEditor) (above) like 
+this:
 
-``` {.python}
-from weblogin.kth import AutologinSession
+```python
+import weblogin
+import weblogin.kth
 import os
 
-ug = AutologinSession(os.environ["KTH_LOGIN"],
-                      os.environ["KTH_PASSWD"],
-                      "https://app.kth.se/ug-gruppeditor/")
+ug = weblogin.AutologinSession([
+                weblogin.kth.UGlogin(os.environ["KTH_LOGIN"],
+                                     os.environ["KTH_PASSWD"],
+                                     "https://app.kth.se/ug-gruppeditor/")
+            ])
 
 response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/users"
                   "?filter=memberOf eq 'u26yk1i3'")
