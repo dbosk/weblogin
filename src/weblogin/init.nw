@@ -46,6 +46,9 @@ class AutologinSession(requests.Session):
     super().__init__()
     self.__handlers = handlers
 
+  def __getstate__(self):
+    <<return state for pickling>>
+
   def request(self, *args, **kwargs):
     """
     Wrapper around requests.Session.request(...) to check we must log in.
@@ -55,6 +58,22 @@ class AutologinSession(requests.Session):
     <<log in if necessary>>
 
     return response
+@
+
+\subsection{Pickling an [[AutologinSession]] object}
+
+The [[requests.Session]] class defined a custom [[__getstate__]] method which 
+overrides the default one.
+This means that we must also provide an override, otherwise the 
+[[requests.Session]] version of [[__getstate__]] will be used.
+This will mean that our [[__handler]] attribute will be left out of pickling.
+
+The [[__getstate__]] method should return a dictionary.
+We'll get the dictionary from the parent method, then add our attribute.
+<<return state for pickling>>=
+state = super().__getstate__()
+state["_AutologinSession__handlers"] = self.__handlers
+return state
 @
 
 \subsection{The [[AutologinHandler]] abstract class}\label{LoginHandler}
