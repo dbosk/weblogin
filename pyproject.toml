@@ -9,8 +9,8 @@ repository = "https://github.com/dbosk/weblogin"
 include = ["src/**/*.py"]
 
 [tool.poetry.urls]
-"Bug Tracker" = "https://github.com/dbosk/ladok3/issues"
-"Releases" = "https://github.com/dbosk/ladok3/releases"
+"Bug Tracker" = "https://github.com/dbosk/weblogin/issues"
+"Releases" = "https://github.com/dbosk/weblogin/releases"
 
 [tool.poetry.dependencies]
 python = "^3.8"
