@@ -428,8 +428,8 @@ doc_tree = html.fromstring(ladok_response.text)
 try:
   form = doc_tree.xpath("//form")[0]
 except IndexError:
-  raise AuthenticationError(f"Got page without any form and not on LADOK: "
-                            f"{ladok_response}")
+  raise weblogin.AuthenticationError(f"Got page without any form and "
+                                     f"not on LADOK: {ladok_response}")
 @
 
 Next, we want to extract default values from the forms variables and substitute 
