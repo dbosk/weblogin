@@ -93,7 +93,7 @@ Hence, we block any new login procedures from starting by setting
 
 There are two cases:
 \begin{enumerate}
-\item We get a 401 unauthorized for a [[kth.se]] URL.
+\item We get a 401 unauthorized or 403 forbidden for a [[kth.se]] URL.
 \item We get redirected to the login server.
 \end{enumerate}
 Thus, we can detect this with either the return code or if the URL starts with 
@@ -101,8 +101,9 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a 
 login.
 <<check if we're redirected to login server>>=
-if response.status_code == requests.codes.unauthorized and \
-          "kth.se" in response.url:
+possible_status_codes = [requests.codes.unauthorized, requests.codes.forbidden]
+if response.status_code in possible_status_codes and \
+     "kth.se" in response.url:
   self.__rerun_requests = True
   return True
 elif response.url.startswith(self.LOGIN_URL):
