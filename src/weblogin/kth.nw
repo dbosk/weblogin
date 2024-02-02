@@ -38,6 +38,7 @@ class UGlogin(weblogin.AutologinHandler):
   login.ug.kth.se.
   """
   LOGIN_URL = "https://login.ug.kth.se"
+  <<class attributes>>
   
   def __init__(self, username, password, login_trigger_url=None,
                rerun_requests=False):
@@ -100,9 +101,13 @@ Thus, we can detect this with either the return code or if the URL starts with
 the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a 
 login.
+<<class attributes>>=
+UNAUTH_STATUS_CODES = [
+  requests.codes.unauthorized,
+  requests.codes.forbidden
+]
 <<check if we're redirected to login server>>=
-possible_status_codes = [requests.codes.unauthorized, requests.codes.forbidden]
-if response.status_code in possible_status_codes and \
+if response.status_code in self.UNAUTH_STATUS_CODES and \
      "kth.se" in response.url:
   self.__rerun_requests = True
   return True
@@ -116,8 +121,8 @@ return False
 
 If we need to log in, we have three cases:
 \begin{enumerate}
-\item \label{UGunauthorized} Either we got a 401 response, because we called an 
-API URL without being authenticated.
+\item \label{UGunauthorized} Either we got a 401 or 403 response, because we 
+called an API URL without being authenticated.
 \item \label{UGloginPage} Or, we tried to access a UI URL which redirected to 
 the login page.
 \item \label{UGsaml} Or, we used SAML and were redirected to the login server 
@@ -126,13 +131,13 @@ to handle a SAML request.
 \end{enumerate}
 
 If we got the first case (\cref{UGunauthorized}), we called an API URL which 
-gave a 401 unauthorized response, we want to use the [[login_trigger_url]] to 
-get into the second case (\cref{UGloginPage}).
+gave a 401 unauthorized or 403 forbidden response, we want to use the 
+[[login_trigger_url]] to get into the second case (\cref{UGloginPage}).
 In the second case, response will contain the login page.
 We just need to fill the login form and submit it.
 In the third case (\cref{UGsaml}), we just want to continue the redirect.
 <<log in to login server, produce new response>>=
-if response.status_code == requests.codes.unauthorized:
+if response.status_code in self.UNAUTH_STATUS_CODES:
   <<trigger redirect to login page>>
 else:
   <<parse login page, post login form, or handle SAML request>>
@@ -202,7 +207,11 @@ final_response = login_response
 To handle the SAML request, we simply find the form, read all variables and 
 post the newly formed request.
 <<handle the SAML request to UG>>=
-form = doc_tree.xpath("//form")[0]
+try:
+  form = doc_tree.xpath("//form")[0]
+except IndexError:
+  raise weblogin.AuthenticationError(
+    f"authentication failed, no form found: {response.text}")
 
 data = {}
 for variable in form.xpath("//input"):
@@ -226,6 +235,8 @@ It's hard to test the functionality.
 We basically want to test if the API on the other side still works.
 We can use the [[app.kth.se/ug-gruppeditor]] to test the two different 
 behaviours.
+Then we'll use [[kth.se/form/admin]] to test another.
+
 The first requests the UI, which redirects automatically.
 The second tests the API, which doesn't redirect the request, but we must do 
 the redirect ourselves using the [[login_trigger_url]].
@@ -256,6 +267,20 @@ def test_get_api():
   assert response.status_code == requests.codes.ok and response.json()
 
 <<more test functions>>
+@
+
+Next, we'll do the same test using KTH Forms, since that gives forbidden 
+instead of unauthorized.
+<<more test functions>>=
+def test_get_form_admin():
+  form = weblogin.AutologinSession([
+      UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"],
+              "https://www.kth.se/form/admin/")
+    ])
+  response = form.get("https://www.kth.se/form/admin/api/webform/"
+                      "65bbb936dcba25abb5f696da/answer/export")
+  assert response.status_code == requests.codes.ok and \
+    "application/" in response.headers["Content-Type"]
 @
 
 Now, we would also like to test authentication errors.
