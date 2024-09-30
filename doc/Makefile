@@ -12,6 +12,7 @@ FIGS+=		figs/weblogin.pdf
 
 weblogin.pdf: ${FIGS}
 
+weblogin.pdf: contents.tex
 weblogin.pdf: ../src/weblogin/init.tex
 weblogin.pdf: ../src/weblogin/kth.tex
 weblogin.pdf: ../src/weblogin/seamlessaccess.tex
