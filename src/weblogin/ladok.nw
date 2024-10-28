@@ -187,7 +187,6 @@ We add a default argument to the constructor, we default to the production
 system URL.
 <<SSOlogin args>>=
 test_environment=False,
-
 <<SSOlogin constructor>>=
 if test_environment:
   self.__base_url = "https://www.test.ladok.se"
@@ -233,6 +232,7 @@ If we need to log in we have a few steps to do:
 <<run return request with added institution SAML URL as entityID>>
 @ Once these steps are completed, the institution SAML and login handler should 
 take over.
+(These steps are all inferred from logging into LADOK using the web browser.)
 
 This takes place in the body of
 \begin{center}
@@ -241,10 +241,14 @@ This takes place in the body of
 So those arguments are what we have to work with.
 
 We don't really need the [[/gui/loggain]] page, we simply start the login with 
-the following URL and it will trigger the steps needed.
+the following URL\footnote{%
+  This was changed by LADOK during October 2024.
+  Seems like they've constructed this SWAMID service that they're using 
+  instead.
+} and it will trigger the steps needed.
 <<start ladok login>>=
-response = session.get(f"{self.__base_url}/Shibboleth.sso/Login"
-                       f"?target={self.__base_url}/gui/shiblogin")
+response = session.get(f"{self.__base_url}/Shibboleth.sso/Logout"
+                       f"?return={self.__base_url}/gui/auth/swamid/login")
 @
 
 That URL will redirect to SeamlessAccess.org.

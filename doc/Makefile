@@ -5,7 +5,7 @@ LATEXFLAGS+=	-shell-escape
 TEX_PYTHONTEX=	yes
 PYTHONTEXFLAGS=	--interpreter "python:poetry run python3"
 
-weblogin.pdf: preamble.tex abstract.tex ../LICENSE
+weblogin.pdf: preamble.tex abstract.tex ../LICENSE didactic.sty
 weblogin.pdf: intro.tex
 
 FIGS+=		figs/weblogin.pdf
@@ -45,3 +45,5 @@ distclean:
 
 INCLUDE_MAKEFILES=../makefiles
 include ${INCLUDE_MAKEFILES}/tex.mk
+INCLUDE_DIDACTIC=./didactic
+include ${INCLUDE_DIDACTIC}/didactic.mk
