@@ -3,6 +3,11 @@
 \let\subsection\section
 \let\section\chapter
 \usepackage{noweb}
+% Needed to relax penalty for breaking code chunks across pages, otherwise 
+%% there might be a lot of space following a code chunk.
+\def\nwendcode{\endtrivlist \endgroup}
+\let\nwdocspar=\smallbreak
+
 
 \usepackage[hyphens]{url}
 \usepackage[colorlinks]{hyperref}
