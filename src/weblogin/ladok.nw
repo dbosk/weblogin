@@ -418,12 +418,34 @@ This means that we can just iterate until that happens.
 Whenever we encounter a form, we simply fill it and post it (or get, whatever 
 method is specified by the form).
 <<log in to login server>>=
+<<init structure to detect infinite loops>>
 while "ladok.se" not in \
     urllib.parse.urlparse(ladok_response.url, allow_fragments=False).netloc:
   <<find form>>
   <<extract data and substitute variables>>
   <<submit form>>
 @
+
+There are a variety of forms that we might encounter.
+Consider the examples in
+\cref{LadokRedirectPost,LadokConfirmDatasharing}.
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth]{figs/LadokRedirectPost.png}
+\caption{\label{LadokRedirectPost}%
+  A form that redirects to another URL, usually executed automatically with 
+  JavaScript.%
+}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth]{figs/LadokConfirmDatasharing.png}
+\caption{\label{LadokConfirmDatasharing}%
+  A form that asks the user to confirm data sharing.%
+}
+\end{figure}
 
 Now, to find the form we must parse it.
 Then we'll use XPath to find it.
@@ -438,38 +460,178 @@ except IndexError:
 
 Next, we want to extract default values from the forms variables and substitute 
 if needed.
+We get the form variables by iterating over the [[<input>]] elements, which we 
+do by the XPath expression [[.//input]].
+Note the leadning period ([[.]]), which means that we start from the current 
+node.
+Without it, we would get all the [[<input>]] elements in the document.
+That would cause problems further down the line, we'll get back to that.
 <<extract data and substitute variables>>=
 data = {}
 
-for var in form.xpath("//input"):
+for var in form.xpath(".//input"):
   if var.name:
     varname_casefold = var.name.casefold()
     if varname_casefold in self.__vars:
       data[var.name] = self.__vars[varname_casefold]
     else:
-      data[var.name] = var.value or ""
+      <<set value in [[data]] for existing variables [[var]]>>
+@
+
+There are some things we need to consider about these variables.
+\begin{enumerate}
+\item If a variable is given a value several times, we should make a 
+list\footnote{%
+  This doesn't seem like standard behaviour, because the [[lxml]] library 
+  doesn't do this.
+  See
+  [[<<extract data and substitute variables, new attempt>>]] below.
+}.
+This happens in \cref{LadokConfirmDatasharing}.
+Here the problem with the XPath [[//input]] (no leading period) mentioned above 
+arises.
+Without the period the username will occur twice (it's also in another form on 
+the same page), making it a list and triggering a 500 error from the server.
+\item If the [[<input>]] element is of the type radio button, we should check 
+which is checked (the default).
+If it's not checked, we ignore it and proceed to the next.
+This happens in \cref{LadokConfirmDatasharing}.
+\end{enumerate}
+<<set value in [[data]] for existing variables [[var]]>>=
+if var.type == "radio":
+  if var.checked:
+    data[var.name] = var.value
+elif var.name in data:
+  if isinstance(data[var.name], list):
+    data[var.name].append(var.value)
+  else:
+    data[var.name] = [data[var.name], var.value]
+else:
+  data[var.name] = var.value or ""
+@
+
+A better approach than the one above seems to be to use [[form.inputs]], which 
+is a dictionary containing all input elements of the form.
+This also handles the radio buttons of \cref{LadokConfirmDatasharing} 
+correctly, so that we only need to do [[element.value]] even for that group.
+<<extract data and substitute variables, new attempt>>=
+data = {}
+
+for name, element in form.inputs.items():
+  name_casefold = name.casefold()
+  if name_casefold in self.__vars:
+    data[name] = self.__vars[name_casefold]
+  else:
+    data[name] = element.value
+@ But, unfortunately, this doesn't handle multiple [[<input>]] elements with 
+the same name.
+It just gives one of them, instead of making a list\footnote{%
+  This is why I think this might not be standard behaviour.
+}.
+This code would have otherwise been much better.
+
+In some cases, there is a named button (\cref{LadokConfirmDatasharing} has 
+\enquote{Proceed} and \enquote{Cancel}).
+We must include that in the data, that we selected to proceed instead of 
+cancel.
+<<extract data and substitute variables>>=
+for button in form.xpath("//button"):
+  name = button.get("name")
+  if button.get("type") == "submit" and "proceed" in name:
+    data[name] = ""
 @
 
 Finally, we submit the form.
 We must extract the form method and the action to construct the URL for the 
 request.
+
 We also try to detect infinite loops, and in such cases, raise an exception.
-We also include [[data]] in the exception, as that contains all variables that 
-must be set correctly, and can, thus, be used to discover which variables to 
-set.
+In that case, we include [[data]] in the exception, as that contains all 
+variables that must be set correctly, and can, thus, be used to discover which 
+variables to set.
 (See \cref{DiscoverVariables}.)
 <<submit form>>=
-prev_url = ladok_response.url
+<<store data to detect infinite loops>>
 
 action_url = urllib.parse.urljoin(ladok_response.url, form.action)
 ladok_response = session.request(form.method, action_url, data=data)
 
-if ladok_response.url == prev_url:
+<<if we're in a loop>>:
   err = weblogin.AuthenticationError(f"infinite loop for "
                                      f"URL: {action_url}\n"
                                      f"data: {data}")
   err.variables = data
   raise err
+@
+
+To detect infinite loops, we check if the URL is the same as any previous URL.
+To be able to detect longer loops, rather than just the previous URL being the 
+same, we store the data in a dictionary with the URLs as keys.
+However, in some cases, the same URL will occur more than once,
+even if there is no infinite loop.
+For example, the page in \cref{LadokConfirmDatasharing} will be followed by the 
+page in \cref{LadokRedirectPost}---both will have the same URL.
+However, as we can see, the contents will differ, particularly the inputs in 
+the forms.
+Whereas when we have an infinite loop (for example, when we use the wrong 
+password), the contents will be the same.
+So we'll use this fact.
+<<init structure to detect infinite loops>>=
+prev = {}
+<<store data to detect infinite loops>>=
+inputs = html.fromstring(ladok_response.text).xpath("//form")[0].inputs.keys()
+prev[ladok_response.url] = inputs
+@ Once we've made the request, we'll have a new response in [[ladok_response]].
+So we can extract the new forms and perform the check.
+Of course, some pages might not contain any form.
+<<if we're in a loop>>=
+try:
+  new_inputs = \
+    html.fromstring(ladok_response.text).xpath("//form")[0].inputs.keys()
+except IndexError:
+  new_inputs = None
+if ladok_response.url in prev and new_inputs == prev[ladok_response.url]
+@ (Note that we don't want the ending colon in the [[if]] statement, because we 
+already have it in [[<<submit form>>]].)
+
+Let's test that this works.
+We'll start by providing a wrong password (username as well), so that the login 
+will fail.
+This way we'll get back to the same page over and over.
+<<more test functions>>=
+def test_SSOlogin_infinite_loop():
+  ls = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology",
+                         vars={
+                            "username": "invalid user",
+                            "password": "this is the wrong password"
+                          })
+        ])
+
+  try:
+    <<make a request using ls>>
+  except weblogin.AuthenticationError as err:
+    assert "infinite loop" in str(err)
+  else:
+    assert False
+@
+
+We'll do the same test again, but this time, we don't provide any credentials 
+at all.
+This case returned a 500 error when we used [[//input]] instead of [[.//input]] 
+above.
+<<more test functions>>=
+def test_SSOlogin_infinite_loop_no_credentials():
+  ls = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology")
+        ])
+
+  try:
+    <<make a request using ls>>
+  except weblogin.AuthenticationError as err:
+    assert "infinite loop" in str(err)
+  else:
+    assert False
 @
 
 \subsection{Finding which variables to set}\label{DiscoverVariables}
