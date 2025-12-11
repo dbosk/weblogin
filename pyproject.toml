@@ -6,7 +6,19 @@ authors = ["Daniel Bosk <dbosk@kth.se>"]
 license = "MIT"
 readme = "intro.md"
 repository = "https://github.com/dbosk/weblogin"
-include = ["src/**/*.py"]
+include = [
+  {path="src/**/*.py", format="wheel"},
+  {path="src/**/*.nw", format="sdist"},
+  {path="src/**/Makefile", format="sdist"},
+  {path="src/**/*.tex", format="sdist"}
+]
+exclude = [
+  {path="src/**/*.py", format="sdist"},
+  {path="src/**/*.nw", format="wheel"},
+  "*/**/.gitignore",
+  "*/**/ltxobj",
+  "*/**/__pycache__"
+]
 
 [tool.poetry.urls]
 "Bug Tracker" = "https://github.com/dbosk/weblogin/issues"
@@ -17,7 +29,7 @@ python = "^3.8"
 requests = "^2.28.1"
 lxml = "^5.3.0"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 pytest = "^7.2.0"
 
 [build-system]
