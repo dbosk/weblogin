@@ -12,7 +12,7 @@ TESTS=	$(shell ${find_tests})
 
 .PHONY: all
 all: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
-	poetry run pytest ${PYTESTARG}
+	poetry run pytest ${PYTESTFLAGS}
 
 $(foreach files,${TESTS},$(eval $(call def_target, ${files})))
 
