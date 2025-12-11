@@ -181,7 +181,9 @@ elif response.url.startswith(self.__login_url):
 return False
 @
 
-The login URL is different for the test system and the production system.
+The login URL\footnote{%
+  LADOK updated the URLs in December 2025.
+} is different for the test system and the production system.
 We want to be able to handle both.
 We add a default argument to the constructor, we default to the production 
 system URL.
@@ -189,9 +191,9 @@ system URL.
 test_environment=False,
 <<SSOlogin constructor>>=
 if test_environment:
-  self.__base_url = "https://www.test.ladok.se"
+  self.__base_url = "https://start.test.ladok.se"
 else:
-  self.__base_url = "https://www.start.ladok.se"
+  self.__base_url = "https://start.ladok.se"
 
 self.__login_url = f"{self.__base_url}/gui/loggain"
 @
