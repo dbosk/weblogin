@@ -26,7 +26,7 @@ To determine if we need to log in, we use login handlers (\cref{LoginHandler}).
   \label{WebloginOverview}
 \end{figure}
 
-<<init.py>>=
+<<[[init.py]]>>=
 import requests
 
 <<exceptions>>
