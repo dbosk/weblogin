@@ -11,7 +11,7 @@ There are two login handlers needed for KTH.
 \end{enumerate}
 
 The module looks like this.
-<<kth.py>>=
+<<[[kth.py]]>>=
 from lxml import html
 import requests
 import urllib.parse
@@ -242,7 +242,7 @@ The second tests the API, which doesn't redirect the request, but we must do
 the redirect ourselves using the [[login_trigger_url]].
 
 The two tests follow.
-<<test kth.py>>=
+<<test [[kth.py]]>>=
 import weblogin
 from weblogin.kth import UGlogin
 import os

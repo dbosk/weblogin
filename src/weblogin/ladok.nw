@@ -22,7 +22,7 @@ before returning to this general-purpose code.
 We need a class for LADOK that detects logins to LADOK.
 Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
 class.
-<<ladok.py>>=
+<<[[ladok.py]]>>=
 from lxml import html
 from pprint import pprint
 import requests
@@ -96,7 +96,7 @@ login procedure.
 We need two more handlers in this case, one for the SAML implementation 
 ([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the 
 institution ([[weblogin.kth.UGlogin]] below).
-<<test ladok.py>>=
+<<test [[ladok.py]]>>=
 import weblogin
 from weblogin import kth, ladok
 import os

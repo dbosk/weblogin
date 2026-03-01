@@ -13,12 +13,12 @@ We will provide two functions using SeamlessAccess.org:
 \end{enumerate}
 
 The module is structured as follows.
-<<seamlessaccess.py>>=
+<<[[seamlessaccess.py]]>>=
 import requests
 
 <<functions>>
 @ We will test these functions using the following test script.
-<<test seamlessaccess.py>>=
+<<test [[seamlessaccess.py]]>>=
 from weblogin.seamlessaccess import *
 
 <<test functions>>
