@@ -7,12 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make                        # Build all (.nw → .py and .tex)
 cd src/weblogin && make      # Build source only
-cd tests && make             # Run tests (poetry run pytest)
-cd tests && poetry run pytest tests/test_kth.py  # Single test file
+cd tests && make             # Generate test files from .nw and run pytest
+cd tests && poetry run pytest test_kth.py  # Single test file (after make generates it)
 poetry build                 # Build distribution packages
 ```
 
 Integration tests require environment variables `KTH_LOGIN` and `KTH_PASSWD`.
+
+Key dependencies: `requests` for HTTP sessions, `lxml` for HTML form parsing in login handlers, `beautifulsoup4` for markup processing.
 
 ## Literate Programming (CRITICAL)
 
@@ -27,6 +29,8 @@ This project uses **noweb literate programming**. The `.nw` files are the source
 ### Noweb conventions
 
 - Code chunks: `<<chunk name>>=` on its own line, reference with `<<chunk name>>`
+- File-level output chunks use `<<[[filename.py]]>>=` (e.g., `<<[[kth.py]]>>`)
+- Generated `.py` files are auto-formatted with `black` during build
 - Quote identifiers in prose with `[[code]]` (not `\texttt{}`)
 - Escape identifiers in chunk names: `<<restrict to [[show_tree]]>>=`
 - LaTeX documentation: use `\enquote{}` for quotes, `\cref{}` for cross-references, `description` environment for labeled lists
@@ -44,7 +48,7 @@ The `.py` files in `src/weblogin/` and `tests/` are generated — only `.nw` fil
 
 **weblogin** provides transparent automated login to web UIs via `requests.Session` wrapping.
 
-### Core classes (`src/weblogin/init.nw`)
+### Core classes (`src/weblogin/init.nw` → `__init__.py`)
 
 - **`AutologinSession(handlers)`** — extends `requests.Session`; intercepts HTTP requests and triggers login handlers when authentication is needed
 - **`AutologinHandler`** — abstract base class with `need_login(response)` and `login(session, response, args, kwargs)` methods
