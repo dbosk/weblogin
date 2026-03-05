@@ -107,13 +107,16 @@ driver.execute_script(
 After submitting, we may land on an MFA challenge or proceed directly
 to the target page.
 We wait for either condition.
+We check whether we have left the login page \emph{before} scanning for
+an MFA number, to avoid false positives from two-digit numbers that may
+appear on the destination page.
 <<wait for MFA or completion>>=
 def mfa_or_done(d):
+  if not _on_login_page(d.current_url):
+    return ("done", None)
   number = find_mfa_number(d)
   if number:
     return ("mfa", number)
-  if not _on_login_page(d.current_url):
-    return ("done", None)
   return None
 
 result = WebDriverWait(driver, 30).until(mfa_or_done)

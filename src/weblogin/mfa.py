@@ -44,11 +44,11 @@ def do_login(driver, username, password, trigger_url):
     driver.execute_script("document.getElementById('submitButton').click();")
 
     def mfa_or_done(d):
+        if not _on_login_page(d.current_url):
+            return ("done", None)
         number = find_mfa_number(d)
         if number:
             return ("mfa", number)
-        if not _on_login_page(d.current_url):
-            return ("done", None)
         return None
 
     result = WebDriverWait(driver, 30).until(mfa_or_done)
