@@ -140,20 +140,32 @@ def save_cookies(jar, cookie_file):
         pickle.dump(jar, f)
 
 
+def _default_cookie_file(trigger_url):
+    import urllib.parse
+
+    hostname = urllib.parse.urlparse(trigger_url).hostname or "weblogin"
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "weblogin")
+    return os.path.join(cache_dir, hostname + ".pkl")
+
+
 def main():
     """
-    Perform a KTH MFA login and save cookies to a file.
+    Perform an MFA login and save cookies to a file.
 
-    Usage: python -m weblogin.mfa <trigger_url> <cookie_file>
+    Usage: python -m weblogin.mfa <trigger_url> [cookie_file]
+
+    If cookie_file is omitted, defaults to ~/.cache/weblogin/<hostname>.pkl.
     """
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(
-            "Usage: python -m weblogin.mfa <trigger_url> <cookie_file>", file=sys.stderr
+            "Usage: python -m weblogin.mfa <trigger_url> [cookie_file]", file=sys.stderr
         )
         sys.exit(1)
 
     trigger_url = sys.argv[1]
-    cookie_file = sys.argv[2]
+    cookie_file = (
+        sys.argv[2] if len(sys.argv) >= 3 else _default_cookie_file(trigger_url)
+    )
 
     username = input("KTH username: ")
     password = getpass.getpass("KTH password: ")
