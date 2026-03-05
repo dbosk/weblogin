@@ -12,6 +12,21 @@ challenge interactively, and save the resulting cookies to a file.
 Other scripts can then load these cookies and make requests without
 going through the login flow again.
 
+Since Selenium is not needed for institutions without MFA, it is an
+optional dependency.
+Install it with:
+\begin{verbatim}
+pip install weblogin[mfa]
+\end{verbatim}
+The module can then be used from the command line:
+\begin{verbatim}
+python -m weblogin.mfa <trigger_url> <cookie_file>
+\end{verbatim}
+or imported to use the individual functions:
+\begin{verbatim}
+from weblogin.mfa import setup_browser, do_login, collect_cookies, save_cookies
+\end{verbatim}
+
 The module looks like this.
 \nwfilename{mfa.nw}\nwbegincode{1}\sublabel{NWXRURf-1Fx3qe-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-1Fx3qe-1}}}\moddef{\code{}mfa.py\edoc{}~{\nwtagstyle{}\subpageref{NWXRURf-1Fx3qe-1}}}\endmoddef\nwstartdeflinemarkup\nwenddeflinemarkup
 import getpass
@@ -107,13 +122,16 @@ driver.execute_script(
 After submitting, we may land on an MFA challenge or proceed directly
 to the target page.
 We wait for either condition.
+We check whether we have left the login page \emph{before} scanning for
+an MFA number, to avoid false positives from two-digit numbers that may
+appear on the destination page.
 \nwenddocs{}\nwbegincode{11}\sublabel{NWXRURf-rpbYU-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-rpbYU-1}}}\moddef{wait for MFA or completion~{\nwtagstyle{}\subpageref{NWXRURf-rpbYU-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-46xhjq-1}}\nwenddeflinemarkup
 def mfa_or_done(d):
+  if not _on_login_page(d.current_url):
+    return ("done", None)
   number = find_mfa_number(d)
   if number:
     return ("mfa", number)
-  if not _on_login_page(d.current_url):
-    return ("done", None)
   return None
 
 result = WebDriverWait(driver, 30).until(mfa_or_done)

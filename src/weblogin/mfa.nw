@@ -12,6 +12,21 @@ challenge interactively, and save the resulting cookies to a file.
 Other scripts can then load these cookies and make requests without
 going through the login flow again.
 
+Since Selenium is not needed for institutions without MFA, it is an
+optional dependency.
+Install it with:
+\begin{verbatim}
+pip install weblogin[mfa]
+\end{verbatim}
+The module can then be used from the command line:
+\begin{verbatim}
+python -m weblogin.mfa <trigger_url> <cookie_file>
+\end{verbatim}
+or imported to use the individual functions:
+\begin{verbatim}
+from weblogin.mfa import setup_browser, do_login, collect_cookies, save_cookies
+\end{verbatim}
+
 The module looks like this.
 <<[[mfa.py]]>>=
 import getpass
