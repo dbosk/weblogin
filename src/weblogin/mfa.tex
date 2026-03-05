@@ -36,11 +36,15 @@ import pickle
 import re
 import sys
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+try:
+  from selenium import webdriver
+  from selenium.webdriver.chrome.options import Options
+  from selenium.webdriver.common.by import By
+  from selenium.webdriver.support import expected_conditions as EC
+  from selenium.webdriver.support.ui import WebDriverWait
+except ImportError:
+  raise ImportError(
+    "weblogin.mfa requires Selenium. Install with: pip install weblogin[mfa]")
 
 import requests.cookies
 
