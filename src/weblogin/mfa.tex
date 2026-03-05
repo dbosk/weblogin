@@ -1,0 +1,326 @@
+\section{Handling MFA at KTH}\label{MFAsessionkeeper}% ===> this file was generated automatically by noweave --- better not edit it
+
+Many universities, including KTH, have introduced Multi-Factor
+Authentication (MFA) using Microsoft Authenticator with number matching.
+This breaks the standard {\Tt{}weblogin\nwendquote} approach: the login page is now
+heavily JavaScript-driven and requires a real browser to render the MFA
+challenge.
+
+The solution is a \emph{session keeper}: a script that uses a headless
+Chrome browser (via Selenium) to perform the login once, handle the MFA
+challenge interactively, and save the resulting cookies to a file.
+Other scripts can then load these cookies and make requests without
+going through the login flow again.
+
+Since Selenium is not needed for institutions without MFA, it is an
+optional dependency.
+Install it with:
+\begin{verbatim}
+pip install weblogin[mfa]
+\end{verbatim}
+The module can then be used from the command line:
+\begin{verbatim}
+python -m weblogin.mfa <trigger_url> <cookie_file>
+\end{verbatim}
+or imported to use the individual functions:
+\begin{verbatim}
+from weblogin.mfa import setup_browser, do_login, collect_cookies, save_cookies
+\end{verbatim}
+
+The module looks like this.
+\nwfilename{mfa.nw}\nwbegincode{1}\sublabel{NWXRURf-1Fx3qe-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-1Fx3qe-1}}}\moddef{\code{}mfa.py\edoc{}~{\nwtagstyle{}\subpageref{NWXRURf-1Fx3qe-1}}}\endmoddef\nwstartdeflinemarkup\nwenddeflinemarkup
+import getpass
+import http.cookiejar
+import os
+import pickle
+import re
+import sys
+
+try:
+  from selenium import webdriver
+  from selenium.webdriver.chrome.options import Options
+  from selenium.webdriver.common.by import By
+  from selenium.webdriver.support import expected_conditions as EC
+  from selenium.webdriver.support.ui import WebDriverWait
+except ImportError:
+  raise ImportError(
+    "weblogin.mfa requires Selenium. Install with: pip install weblogin[mfa]")
+
+import requests.cookies
+
+\LA{}set up headless browser~{\nwtagstyle{}\subpageref{NWXRURf-ipLdC-1}}\RA{}
+\LA{}perform login~{\nwtagstyle{}\subpageref{NWXRURf-46xhjq-1}}\RA{}
+\LA{}find MFA number~{\nwtagstyle{}\subpageref{NWXRURf-33O1O9-1}}\RA{}
+\LA{}collect cookies~{\nwtagstyle{}\subpageref{NWXRURf-4ZzA54-1}}\RA{}
+\LA{}save cookies~{\nwtagstyle{}\subpageref{NWXRURf-1N6piN-1}}\RA{}
+\LA{}command-line interface~{\nwtagstyle{}\subpageref{NWXRURf-3jIocA-1}}\RA{}
+\nwnotused{[[mfa.py]]}\nwendcode{}\nwbegindocs{2}\nwdocspar
+
+\subsection{Setting up the headless browser}
+
+We use Chrome in headless mode.
+The {\Tt{}--no-sandbox\nwendquote} and {\Tt{}--disable-dev-shm-usage\nwendquote} flags are needed
+when running on a server without a display.
+\nwenddocs{}\nwbegincode{3}\sublabel{NWXRURf-ipLdC-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-ipLdC-1}}}\moddef{set up headless browser~{\nwtagstyle{}\subpageref{NWXRURf-ipLdC-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwenddeflinemarkup
+def setup_browser():
+  """Start a headless Chrome browser and return the driver."""
+  options = Options()
+  options.add_argument("--headless=new")
+  options.add_argument("--no-sandbox")
+  options.add_argument("--disable-dev-shm-usage")
+  options.add_argument("--disable-gpu")
+  options.add_argument("--window-size=1280,900")
+  return webdriver.Chrome(options=options)
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{4}\nwdocspar
+
+\subsection{Performing the login}
+
+The login flow is as follows.
+\begin{enumerate}
+\item Navigate to a URL that triggers a redirect to the KTH login page.
+\item Fill in credentials using JavaScript injection.
+  We cannot use {\Tt{}send{\_}keys\nwendquote} because it fails with
+  \enquote{element not interactable} in headless Chrome on this page.
+\item Wait for either the MFA number to appear or for the login to
+  complete directly (some services skip MFA on trusted networks).
+\item If MFA is required, print the number and wait for the user to
+  approve on their phone.
+\end{enumerate}
+\nwenddocs{}\nwbegincode{5}\sublabel{NWXRURf-46xhjq-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-46xhjq-1}}}\moddef{perform login~{\nwtagstyle{}\subpageref{NWXRURf-46xhjq-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwprevnextdefs{\relax}{NWXRURf-46xhjq-2}\nwenddeflinemarkup
+def do_login(driver, username, password, trigger_url):
+  """
+  Navigate to trigger_url, fill credentials, handle MFA if needed.
+  Raises RuntimeError on timeout.
+  """
+  driver.get(trigger_url)
+
+  \LA{}wait for login page~{\nwtagstyle{}\subpageref{NWXRURf-lIcJE-1}}\RA{}
+  \LA{}fill credentials~{\nwtagstyle{}\subpageref{NWXRURf-45NdAu-1}}\RA{}
+  \LA{}wait for MFA or completion~{\nwtagstyle{}\subpageref{NWXRURf-rpbYU-1}}\RA{}
+\nwalsodefined{\\{NWXRURf-46xhjq-2}}\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{6}\nwdocspar
+
+We wait until we land on {\Tt{}login.ug.kth.se\nwendquote}, which is KTH's
+authentication server.
+\nwenddocs{}\nwbegincode{7}\sublabel{NWXRURf-lIcJE-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-lIcJE-1}}}\moddef{wait for login page~{\nwtagstyle{}\subpageref{NWXRURf-lIcJE-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-46xhjq-1}}\nwenddeflinemarkup
+WebDriverWait(driver, 20).until(
+  lambda d: "login.ug.kth.se" in d.current_url)
+\nwused{\\{NWXRURf-46xhjq-1}}\nwendcode{}\nwbegindocs{8}\nwdocspar
+
+We fill in credentials via JavaScript because {\Tt{}send{\_}keys\nwendquote} does not
+work reliably in headless Chrome on this particular page.
+We append {\Tt{}@ug.kth.se\nwendquote} if needed, since the login form expects the
+full UG username.
+\nwenddocs{}\nwbegincode{9}\sublabel{NWXRURf-45NdAu-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-45NdAu-1}}}\moddef{fill credentials~{\nwtagstyle{}\subpageref{NWXRURf-45NdAu-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-46xhjq-1}}\nwenddeflinemarkup
+uname = username if "@ug.kth.se" in username \\
+                 else username + "@ug.kth.se"
+driver.execute_script(
+  "document.getElementById('userNameInput').value = arguments[0];",
+  uname)
+driver.execute_script(
+  "document.getElementById('passwordInput').value = arguments[0];",
+  password)
+driver.execute_script(
+  "document.getElementById('submitButton').click();")
+\nwused{\\{NWXRURf-46xhjq-1}}\nwendcode{}\nwbegindocs{10}\nwdocspar
+
+After submitting, we may land on an MFA challenge or proceed directly
+to the target page.
+We wait for either condition.
+We check whether we have left the login page \emph{before} scanning for
+an MFA number, to avoid false positives from two-digit numbers that may
+appear on the destination page.
+\nwenddocs{}\nwbegincode{11}\sublabel{NWXRURf-rpbYU-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-rpbYU-1}}}\moddef{wait for MFA or completion~{\nwtagstyle{}\subpageref{NWXRURf-rpbYU-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-46xhjq-1}}\nwenddeflinemarkup
+def mfa_or_done(d):
+  if not _on_login_page(d.current_url):
+    return ("done", None)
+  number = find_mfa_number(d)
+  if number:
+    return ("mfa", number)
+  return None
+
+result = WebDriverWait(driver, 30).until(mfa_or_done)
+
+if result[0] == "mfa":
+  \LA{}handle MFA challenge~{\nwtagstyle{}\subpageref{NWXRURf-4J8dR3-1}}\RA{}
+\nwused{\\{NWXRURf-46xhjq-1}}\nwendcode{}\nwbegindocs{12}\nwdocspar
+
+When MFA is required, we print the number and wait up to two minutes
+for the user to approve on their phone.
+\nwenddocs{}\nwbegincode{13}\sublabel{NWXRURf-4J8dR3-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-4J8dR3-1}}}\moddef{handle MFA challenge~{\nwtagstyle{}\subpageref{NWXRURf-4J8dR3-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-rpbYU-1}}\nwenddeflinemarkup
+number = result[1]
+print("\\n" + "=" * 50)
+print("  Enter  \{\}  in Microsoft Authenticator".format(number))
+print("=" * 50 + "\\n")
+WebDriverWait(driver, 120).until(
+  lambda d: not _on_login_page(d.current_url))
+\nwused{\\{NWXRURf-rpbYU-1}}\nwendcode{}\nwbegindocs{14}\nwdocspar
+
+We use a small helper to check if we are still on the login page.
+\nwenddocs{}\nwbegincode{15}\sublabel{NWXRURf-46xhjq-2}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-46xhjq-2}}}\moddef{perform login~{\nwtagstyle{}\subpageref{NWXRURf-46xhjq-1}}}\plusendmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwprevnextdefs{NWXRURf-46xhjq-1}{\relax}\nwenddeflinemarkup
+def _on_login_page(url):
+  return "login.ug.kth.se" in url or "microsoftonline.com" in url
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{16}\nwdocspar
+
+\subsection{Finding the MFA number}
+
+Microsoft Authenticator number matching displays a two-digit number
+that the user must enter on their phone.
+The number appears in a specific element, but the element ID has varied
+across Microsoft updates.
+We therefore try several known IDs and fall back to scanning the page
+body for any standalone two-digit number.
+\nwenddocs{}\nwbegincode{17}\sublabel{NWXRURf-33O1O9-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-33O1O9-1}}}\moddef{find MFA number~{\nwtagstyle{}\subpageref{NWXRURf-33O1O9-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwenddeflinemarkup
+_MFA_ELEMENT_IDS = [
+  "idRichContext_DisplaySign",
+  "displaySign",
+  "idDiv_DisplaySign",
+]
+
+def find_mfa_number(driver):
+  """
+  Return the MFA number shown on the current page, or None if not present.
+  """
+  for eid in _MFA_ELEMENT_IDS:
+    elems = driver.find_elements(By.ID, eid)
+    if elems:
+      txt = elems[0].text.strip()
+      if txt:
+        return txt
+  \LA{}fall back to body scan~{\nwtagstyle{}\subpageref{NWXRURf-2FUw1V-1}}\RA{}
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{18}\nwdocspar
+
+If no known element is found, we scan the visible body text.
+This is a heuristic, but in practice the MFA number is the only
+prominent two-digit number on the page.
+\nwenddocs{}\nwbegincode{19}\sublabel{NWXRURf-2FUw1V-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-2FUw1V-1}}}\moddef{fall back to body scan~{\nwtagstyle{}\subpageref{NWXRURf-2FUw1V-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-33O1O9-1}}\nwenddeflinemarkup
+body = driver.find_element(By.TAG_NAME, "body").text
+matches = re.findall(r'\\b(\\d\{2\})\\b', body)
+return matches[0] if matches else None
+\nwused{\\{NWXRURf-33O1O9-1}}\nwendcode{}\nwbegindocs{20}\nwdocspar
+
+\subsection{Collecting cookies}
+
+After a successful login, we collect all cookies from the browser and
+convert them into a {\Tt{}requests.cookies.RequestsCookieJar\nwendquote}.
+We use {\Tt{}http.cookiejar.Cookie\nwendquote} objects directly rather than
+{\Tt{}jar.set()\nwendquote}, because {\Tt{}jar.set()\nwendquote} does not correctly handle domain
+cookies with a leading dot (e.g.\ {\Tt{}.kth.se\nwendquote}).
+\nwenddocs{}\nwbegincode{21}\sublabel{NWXRURf-4ZzA54-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-4ZzA54-1}}}\moddef{collect cookies~{\nwtagstyle{}\subpageref{NWXRURf-4ZzA54-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwenddeflinemarkup
+def collect_cookies(driver, extra_urls=None):
+  """
+  Collect cookies from the browser and return a RequestsCookieJar.
+  If extra_urls is given, also visit those URLs to pick up their cookies
+  (useful when SSO spans multiple domains).
+  """
+  jar = requests.cookies.RequestsCookieJar()
+  _add_driver_cookies(jar, driver)
+
+  for url in (extra_urls or []):
+    driver.get(url)
+    WebDriverWait(driver, 30).until(
+      lambda d: not _on_login_page(d.current_url))
+    _add_driver_cookies(jar, driver)
+
+  return jar
+
+def _add_driver_cookies(jar, driver):
+  for c in driver.get_cookies():
+    domain = c.get("domain", "")
+    cookie = http.cookiejar.Cookie(
+      version=0,
+      name=c["name"],
+      value=c["value"],
+      port=None, port_specified=False,
+      domain=domain,
+      domain_specified=bool(domain),
+      domain_initial_dot=domain.startswith("."),
+      path=c.get("path", "/"),
+      path_specified=bool(c.get("path")),
+      secure=c.get("secure", False),
+      expires=c.get("expiry"),
+      discard=False,
+      comment=None, comment_url=None,
+      rest=\{"HttpOnly": ""\} if c.get("httpOnly") else \{\},
+    )
+    jar.set_cookie(cookie)
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{22}\nwdocspar
+
+\subsection{Saving cookies}
+
+We save the cookie jar to a file using {\Tt{}pickle\nwendquote}, so that other
+scripts can load it with {\Tt{}pickle.load\nwendquote} and pass the jar directly to
+a {\Tt{}requests.Session\nwendquote}.
+\nwenddocs{}\nwbegincode{23}\sublabel{NWXRURf-1N6piN-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-1N6piN-1}}}\moddef{save cookies~{\nwtagstyle{}\subpageref{NWXRURf-1N6piN-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwenddeflinemarkup
+def save_cookies(jar, cookie_file):
+  """Save a RequestsCookieJar to cookie_file using pickle."""
+  os.makedirs(os.path.dirname(os.path.abspath(cookie_file)), exist_ok=True)
+  with open(cookie_file, "wb") as f:
+    pickle.dump(jar, f)
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}\nwbegindocs{24}\nwdocspar
+
+\subsection{Command-line interface}
+
+When run as a script ({\Tt{}python\ -m\ weblogin.mfa\nwendquote}), the module asks for
+credentials and a target URL, performs the login, and saves the cookies.
+If no cookie file is specified, it defaults to
+{\Tt{}{\char126}/.cache/weblogin/<hostname>.pkl\nwendquote}, where {\Tt{}<hostname>\nwendquote} is derived
+from the trigger URL.
+This ensures that cookies for different services do not overwrite each
+other.
+\nwenddocs{}\nwbegincode{25}\sublabel{NWXRURf-3jIocA-1}\nwmargintag{{\nwtagstyle{}\subpageref{NWXRURf-3jIocA-1}}}\moddef{command-line interface~{\nwtagstyle{}\subpageref{NWXRURf-3jIocA-1}}}\endmoddef\nwstartdeflinemarkup\nwusesondefline{\\{NWXRURf-1Fx3qe-1}}\nwenddeflinemarkup
+def _default_cookie_file(trigger_url):
+  import urllib.parse
+  hostname = urllib.parse.urlparse(trigger_url).hostname or "weblogin"
+  cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "weblogin")
+  return os.path.join(cache_dir, hostname + ".pkl")
+
+def main():
+  """
+  Perform an MFA login and save cookies to a file.
+
+  Usage: python -m weblogin.mfa <trigger_url> [cookie_file]
+
+  If cookie_file is omitted, defaults to ~/.cache/weblogin/<hostname>.pkl.
+  """
+  if len(sys.argv) < 2:
+    print("Usage: python -m weblogin.mfa <trigger_url> [cookie_file]",
+          file=sys.stderr)
+    sys.exit(1)
+
+  trigger_url = sys.argv[1]
+  cookie_file = sys.argv[2] if len(sys.argv) >= 3 \\
+                             else _default_cookie_file(trigger_url)
+
+  username = input("KTH username: ")
+  password = getpass.getpass("KTH password: ")
+
+  driver = setup_browser()
+  try:
+    do_login(driver, username, password, trigger_url)
+    jar = collect_cookies(driver)
+    save_cookies(jar, cookie_file)
+    print("Cookies saved to \{\}".format(cookie_file))
+  except Exception as e:
+    print("ERROR: \{\}".format(e), file=sys.stderr)
+    sys.exit(1)
+  finally:
+    driver.quit()
+
+if __name__ == "__main__":
+  main()
+\nwused{\\{NWXRURf-1Fx3qe-1}}\nwendcode{}
+
+\nwixlogsorted{c}{{\code{}mfa.py\edoc{}}{NWXRURf-1Fx3qe-1}{\nwixd{NWXRURf-1Fx3qe-1}}}%
+\nwixlogsorted{c}{{collect cookies}{NWXRURf-4ZzA54-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-4ZzA54-1}}}%
+\nwixlogsorted{c}{{command-line interface}{NWXRURf-3jIocA-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-3jIocA-1}}}%
+\nwixlogsorted{c}{{fall back to body scan}{NWXRURf-2FUw1V-1}{\nwixu{NWXRURf-33O1O9-1}\nwixd{NWXRURf-2FUw1V-1}}}%
+\nwixlogsorted{c}{{fill credentials}{NWXRURf-45NdAu-1}{\nwixu{NWXRURf-46xhjq-1}\nwixd{NWXRURf-45NdAu-1}}}%
+\nwixlogsorted{c}{{find MFA number}{NWXRURf-33O1O9-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-33O1O9-1}}}%
+\nwixlogsorted{c}{{handle MFA challenge}{NWXRURf-4J8dR3-1}{\nwixu{NWXRURf-rpbYU-1}\nwixd{NWXRURf-4J8dR3-1}}}%
+\nwixlogsorted{c}{{perform login}{NWXRURf-46xhjq-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-46xhjq-1}\nwixd{NWXRURf-46xhjq-2}}}%
+\nwixlogsorted{c}{{save cookies}{NWXRURf-1N6piN-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-1N6piN-1}}}%
+\nwixlogsorted{c}{{set up headless browser}{NWXRURf-ipLdC-1}{\nwixu{NWXRURf-1Fx3qe-1}\nwixd{NWXRURf-ipLdC-1}}}%
+\nwixlogsorted{c}{{wait for login page}{NWXRURf-lIcJE-1}{\nwixu{NWXRURf-46xhjq-1}\nwixd{NWXRURf-lIcJE-1}}}%
+\nwixlogsorted{c}{{wait for MFA or completion}{NWXRURf-rpbYU-1}{\nwixu{NWXRURf-46xhjq-1}\nwixd{NWXRURf-rpbYU-1}}}%
+\nwbegindocs{26}\nwdocspar
+\nwenddocs{}
