@@ -1,0 +1,390 @@
+\section{Microsoft authentication handlers}
+
+Microsoft's Azure Active Directory uses a number-matching
+multi-factor authentication (MFA) step in its login flow.
+When MFA is required, the server presents a page containing a
+number---displayed in a [[<p>]] element with
+[[id="validEntropyNumber"]]---that the user must confirm in the
+Microsoft Authenticator app on their phone.
+
+This module provides a handler that detects the MFA challenge,
+notifies the user of the number, and polls the server by
+resubmitting the page's form until the user approves the request.
+
+Because the MFA page is part of Microsoft's authentication
+pipeline---not tied to any particular institution---this handler
+works universally.
+It identifies the challenge purely by HTML content.
+A URL scope can (and should) be provided for security
+(\cref{AzureMFAURLScope}).
+
+\subsection{Handler ordering}
+
+The [[AzureMFA]] handler must appear \emph{after} the password
+handler in the handler list.
+However, thanks to the [[AutologinSession]] architecture
+(\cref{WebloginOverview}), the ordering requirement is less
+strict than it might seem.
+
+Every intermediate [[session.request()]] call made by other
+handlers---for example when [[UGlogin]] submits the password
+form---passes through the [[AutologinSession.request()]] method,
+which runs the full handler loop on the response.
+This means that [[AzureMFA]] will automatically intercept an MFA
+challenge even when it appears as an intermediate response
+\emph{inside} another handler's login flow.
+
+Usage examples:
+\begin{minted}{python}
+import weblogin
+from weblogin import kth, ladok, microsoft
+
+# KTH with dedicated handlers
+session = weblogin.AutologinSession([
+    kth.UGlogin(username, password, trigger_url),
+    kth.SAMLlogin(),
+    microsoft.AzureMFA(url="https://login.ug.kth.se"),
+])
+
+# Any university via LADOK's general-purpose handler
+session = weblogin.AutologinSession([
+    ladok.SSOlogin("KTH Royal Institute of Technology",
+                   vars={"username": user, "password": pw}),
+    microsoft.AzureMFA(url="https://login.ug.kth.se"),
+])
+\end{minted}
+
+The module structure:
+<<[[microsoft.py]]>>=
+import os
+import subprocess
+import time
+
+import requests
+import urllib.parse
+from lxml import html
+
+import weblogin
+
+<<Azure MFA handler>>
+@
+
+
+\section{The Azure MFA handler}\label{AzureMFAhandler}
+
+<<Azure MFA handler>>=
+class AzureMFA(weblogin.AutologinHandler):
+  """
+  Login handler for Microsoft's Azure MFA number-matching
+  challenge.
+
+  Detects the challenge by looking for a ``<p>`` element with
+  ``id="validEntropyNumber"`` in the response HTML. When
+  detected, notifies the user of the number and polls by
+  resubmitting the page's form until the challenge is resolved.
+
+  Set the ``WEBLOGIN_MFA_NOTIFICATION`` environment variable to
+  a command that will be called with the MFA message as its last
+  argument. If unset, falls back to ``figlet``, then ``print``.
+  """
+  MFA_ELEMENT_ID = "validEntropyNumber"
+  DEFAULT_POLL_INTERVAL = 2
+
+  def __init__(self, url=None,
+               poll_interval=DEFAULT_POLL_INTERVAL):
+    """
+    Creates an MFA handler.
+
+    - ``url``: if set, only intercept responses whose URL starts
+      with this string. Recommended for security.
+    - ``poll_interval``: seconds between poll attempts
+      (default 2).
+    """
+    super().__init__()
+    self.__url = url
+    self.__poll_interval = poll_interval
+    self.__logging_in = False
+
+  def need_login(self, response):
+    """
+    Returns True if the response contains a Microsoft MFA
+    number-matching challenge.
+    """
+    if self.__logging_in:
+      return False
+
+    <<check if MFA challenge is present>>
+
+  def login(self, session, response, args=None, kwargs=None):
+    """
+    Handles the MFA challenge by notifying the user of the
+    number and polling until the user approves in the
+    Authenticator app.
+
+    Raises AuthenticationError if the MFA page has no form.
+    """
+    self.__logging_in = True
+
+    <<extract MFA number>>
+    <<notify user of MFA number>>
+    <<wait for MFA approval>>
+
+    self.__logging_in = False
+    return final_response
+@
+
+We use the same [[self.__logging_in]] guard as the other handlers
+to prevent re-entrant invocations while we are polling.
+
+
+\subsection{Detecting the MFA challenge}\label{AzureMFAURLScope}
+
+The handler first checks whether the response falls within the
+configured URL scope.
+Without a scope, any page passing through the session that
+happens to contain a [[<p id="validEntropyNumber">]] element
+would trigger MFA notification and start a polling loop.
+A malicious or coincidental page could exploit this.
+Scoping to the known authentication endpoint avoids the problem.
+
+If no URL was configured, the handler checks every response---use
+this only when the MFA endpoint is not known ahead of time.
+<<check if MFA challenge is present>>=
+if self.__url is not None \
+    and not response.url.startswith(self.__url):
+  return False
+
+if not response.text:
+  return False
+
+doc_tree = html.fromstring(response.text)
+elements = doc_tree.xpath(
+  f"//p[@id='{self.MFA_ELEMENT_ID}']"
+)
+return len(elements) > 0
+@
+
+
+\subsection{Extracting the MFA number}
+
+Once we know the MFA challenge is present, we extract the number
+from the element's text content.
+<<extract MFA number>>=
+doc_tree = html.fromstring(response.text)
+element = doc_tree.xpath(
+  f"//p[@id='{self.MFA_ELEMENT_ID}']"
+)[0]
+number = element.text_content().strip()
+mfa_message = f"MFA: {number}"
+@
+
+
+\subsection{Notifying the user}\label{AzureMFANotification}
+
+The notification mechanism is controlled by the
+[[WEBLOGIN_MFA_NOTIFICATION]] environment variable.
+If set, its value is split into a command and arguments, with the
+MFA message appended as the final argument.
+This makes the mechanism completely flexible:
+\begin{description}
+\item[Desktop notification]
+  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="notify-send 'Azure MFA'"}
+\item[X11 dialog]
+  \texttt{WEBLOGIN\_MFA\_NOTIFICATION=xmessage}
+\item[KDE dialog]
+  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="kdialog -{}-msgbox"}
+\item[Zulip message to phone]
+  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="zulip-send -{}-stream
+  notifications -{}-subject MFA"}
+\end{description}
+
+If the variable is not set, we try to display the number using
+[[figlet]] for a large, visible terminal output.
+If [[figlet]] is not installed, we fall back to plain [[print]].
+<<notify user of MFA number>>=
+notification_cmd = os.environ.get(
+  "WEBLOGIN_MFA_NOTIFICATION"
+)
+
+if notification_cmd:
+  subprocess.run(
+    notification_cmd.split() + [mfa_message]
+  )
+else:
+  try:
+    subprocess.run(["figlet", mfa_message], check=True)
+  except FileNotFoundError:
+    print(mfa_message)
+@
+
+
+\subsection{Polling for MFA approval}
+
+After notifying the user, we wait for them to approve the MFA
+request in their Authenticator app.
+The MFA page contains a form with hidden input fields (at least
+[[AzureMfaAuthentication]] and [[Context]]).
+We resubmit this form repeatedly until the response no longer
+contains the MFA challenge element---meaning the server accepted
+the approval from the phone.
+
+The critical design decision is \emph{how} we submit the poll
+requests.
+Calling [[session.request()]] would route each poll response
+through the [[AutologinSession]] handler loop.
+Since the MFA page is typically served from a domain that other
+handlers also recognize (for instance, [[UGlogin]] watches
+[[login.ug.kth.se]]), those handlers would fire and attempt to
+re-submit credentials on every poll iteration.
+
+We avoid this by calling [[requests.Session.request(session,
+...)]] directly---the undecorated parent method---which uses the
+session's cookies and TLS state without invoking any handler
+logic.
+<<wait for MFA approval>>=
+current_response = response
+
+while True:
+  time.sleep(self.__poll_interval)
+  <<extract form from current response>>
+  <<post form, bypassing handler loop>>
+  <<check if MFA challenge is resolved>>
+
+final_response = current_response
+@
+
+To extract the form data, we parse the page and collect all
+[[<input>]] elements, the same approach used by the other
+handlers in this package.
+<<extract form from current response>>=
+doc_tree = html.fromstring(current_response.text)
+try:
+  form = doc_tree.xpath("//form")[0]
+except IndexError:
+  raise weblogin.AuthenticationError(
+    "MFA page has no form to submit"
+  )
+
+data = {}
+for var in form.xpath(".//input"):
+  if var.name:
+    data[var.name] = var.value or ""
+
+action_url = urllib.parse.urljoin(
+  current_response.url, form.action
+)
+@
+
+As explained above, we call the parent class method directly to
+bypass the handler loop.
+<<post form, bypassing handler loop>>=
+current_response = requests.Session.request(
+  session, form.method, action_url, data=data
+)
+@
+
+We check whether the MFA challenge has been resolved by looking
+for the disappearance of the [[validEntropyNumber]] element.
+<<check if MFA challenge is resolved>>=
+if not current_response.text:
+  break
+
+resolved_tree = html.fromstring(current_response.text)
+elements = resolved_tree.xpath(
+  f"//p[@id='{self.MFA_ELEMENT_ID}']"
+)
+if len(elements) == 0:
+  break
+@
+
+
+\subsection{Tests}
+
+A live integration test is impractical since it requires real MFA
+interaction.
+Instead, we use mock response objects to test the detection logic
+in [[need_login]].
+<<test [[microsoft.py]]>>=
+import weblogin
+from weblogin.microsoft import AzureMFA
+
+MFA_HTML = """
+<html><body>
+<form method="POST" action="/common/SAS/ProcessAuth">
+  <input name="AzureMfaAuthentication" value="token123" />
+  <input name="Context" value="ctx456" />
+  <p id="validEntropyNumber">42</p>
+</form>
+</body></html>
+"""
+
+NO_MFA_HTML = """
+<html><body>
+<form method="POST" action="/login">
+  <input name="username" value="" />
+  <input name="password" value="" />
+</form>
+</body></html>
+"""
+
+class MockResponse:
+  def __init__(self, text,
+               url="https://login.ug.kth.se/auth",
+               status_code=200):
+    self.text = text
+    self.url = url
+    self.status_code = status_code
+    self.history = []
+
+<<test functions>>
+@
+
+The first test verifies that the handler detects the MFA challenge
+when no URL scope is configured.
+<<test functions>>=
+def test_mfa_detected():
+  handler = AzureMFA()
+  response = MockResponse(MFA_HTML)
+  assert handler.need_login(response)
+@
+
+When a URL scope is provided and the response URL matches, the
+challenge should still be detected.
+<<test functions>>=
+def test_mfa_detected_with_matching_url():
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://login.ug.kth.se/auth"
+  )
+  assert handler.need_login(response)
+@
+
+Conversely, a response from a different domain must not trigger
+the handler, even if the HTML contains the element.
+This is the core security property of URL scoping.
+<<test functions>>=
+def test_mfa_not_detected_wrong_url():
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://evil.example.com/phish"
+  )
+  assert not handler.need_login(response)
+@
+
+A page without the MFA element should not trigger the handler.
+<<test functions>>=
+def test_mfa_not_detected_no_element():
+  handler = AzureMFA()
+  response = MockResponse(NO_MFA_HTML)
+  assert not handler.need_login(response)
+@
+
+An empty response body should be handled gracefully.
+<<test functions>>=
+def test_mfa_not_detected_empty_response():
+  handler = AzureMFA()
+  response = MockResponse("")
+  assert not handler.need_login(response)
+@
