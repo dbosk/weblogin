@@ -43,20 +43,23 @@ from weblogin import kth, ladok, microsoft
 session = weblogin.AutologinSession([
     kth.UGlogin(username, password, trigger_url),
     kth.SAMLlogin(),
-    microsoft.AzureMFA(url="https://login.ug.kth.se"),
+    microsoft.AzureMFA(url="https://login.ug.kth.se",
+                       notification_cmd="notify-send"),
 ])
 
 # Any university via LADOK's general-purpose handler
 session = weblogin.AutologinSession([
     ladok.SSOlogin("KTH Royal Institute of Technology",
                    vars={"username": user, "password": pw}),
-    microsoft.AzureMFA(url="https://login.ug.kth.se"),
+    microsoft.AzureMFA(url="https://login.ug.kth.se",
+                       notification_cmd="notify-send"),
 ])
 \end{minted}
 
 The module structure:
 <<[[microsoft.py]]>>=
 import os
+import shlex
 import subprocess
 import time
 
@@ -85,23 +88,29 @@ class AzureMFA(weblogin.AutologinHandler):
 
   Set the ``WEBLOGIN_MFA_NOTIFICATION`` environment variable to
   a command that will be called with the MFA message as its last
-  argument. If unset, falls back to ``figlet``, then ``print``.
+  argument. If unset, the optional ``notification_cmd``
+  constructor argument is used instead. If neither is set, the
+  handler falls back to ``figlet``, then ``print``.
   """
   MFA_ELEMENT_ID = "validEntropyNumber"
   DEFAULT_POLL_INTERVAL = 2
 
   def __init__(self, url=None,
+               notification_cmd=None,
                poll_interval=DEFAULT_POLL_INTERVAL):
     """
     Creates an MFA handler.
 
     - ``url``: if set, only intercept responses whose URL starts
       with this string. Recommended for security.
+    - ``notification_cmd``: optional command used to notify the
+      user. ``WEBLOGIN_MFA_NOTIFICATION`` takes precedence if set.
     - ``poll_interval``: seconds between poll attempts
       (default 2).
     """
     super().__init__()
     self.__url = url
+    self.__notification_cmd = notification_cmd
     self.__poll_interval = poll_interval
     self.__logging_in = False
 
@@ -181,10 +190,17 @@ mfa_message = f"MFA: {number}"
 
 \subsection{Notifying the user}\label{AzureMFANotification}
 
-The notification mechanism is controlled by the
+The notification mechanism is primarily controlled by the
 [[WEBLOGIN_MFA_NOTIFICATION]] environment variable.
-If set, its value is split into a command and arguments, with the
-MFA message appended as the final argument.
+When that variable is not set, callers may provide
+[[notification_cmd]] to the constructor instead.
+In both cases, the command is split into arguments and the MFA
+message is appended as the final argument.
+This keeps the shell-facing interface flexible while still giving
+application code a direct way to request a particular notifier.
+
+The environment variable takes precedence so that users can
+override a program's default without editing code.
 This makes the mechanism completely flexible:
 \begin{description}
 \item[Desktop notification]
@@ -206,9 +222,12 @@ notification_cmd = os.environ.get(
   "WEBLOGIN_MFA_NOTIFICATION"
 )
 
+if notification_cmd is None:
+  notification_cmd = self.__notification_cmd
+
 if notification_cmd:
   subprocess.run(
-    notification_cmd.split() + [mfa_message]
+    shlex.split(notification_cmd) + [mfa_message]
   )
 else:
   try:
@@ -306,6 +325,7 @@ Instead, we use mock response objects to test the detection logic
 in [[need_login]].
 <<test [[microsoft.py]]>>=
 import weblogin
+import weblogin.microsoft as microsoft
 from weblogin.microsoft import AzureMFA
 
 MFA_HTML = """
@@ -327,6 +347,12 @@ NO_MFA_HTML = """
 </body></html>
 """
 
+RESOLVED_HTML = """
+<html><body>
+<p>Approved</p>
+</body></html>
+"""
+
 class MockResponse:
   def __init__(self, text,
                url="https://login.ug.kth.se/auth",
@@ -335,6 +361,18 @@ class MockResponse:
     self.url = url
     self.status_code = status_code
     self.history = []
+
+def stub_successful_mfa_poll(monkeypatch):
+  monkeypatch.setattr(
+    microsoft.time, "sleep", lambda seconds: None
+  )
+
+  def fake_request(session, method, url, data=None):
+    return MockResponse(RESOLVED_HTML, url=url)
+
+  monkeypatch.setattr(
+    microsoft.requests.Session, "request", fake_request
+  )
 
 <<test functions>>
 @
@@ -387,4 +425,99 @@ def test_mfa_not_detected_empty_response():
   handler = AzureMFA()
   response = MockResponse("")
   assert not handler.need_login(response)
+@
+
+The notification path is sensitive to process environment, so the
+tests explicitly set or unset [[WEBLOGIN_MFA_NOTIFICATION]].
+This prevents a developer's shell configuration from changing test
+outcomes.
+
+When no environment override is present, the constructor's
+[[notification_cmd]] should be used.
+<<test functions>>=
+def test_notification_cmd_used_when_env_is_unset(monkeypatch):
+  calls = []
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA(
+    notification_cmd="notify-send 'Azure MFA'"
+  )
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [
+    (["notify-send", "Azure MFA", "MFA: 42"], False)
+  ]
+@
+
+If the environment variable is set, it overrides the constructor
+argument.
+<<test functions>>=
+def test_env_notification_overrides_constructor(monkeypatch):
+  calls = []
+  monkeypatch.setenv(
+    "WEBLOGIN_MFA_NOTIFICATION", "xmessage"
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA(
+    notification_cmd="notify-send 'Azure MFA'"
+  )
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [(["xmessage", "MFA: 42"], False)]
+@
+
+Without either configuration mechanism, we try [[figlet]] before
+falling back further.
+<<test functions>>=
+def test_figlet_used_when_no_notification_command(monkeypatch):
+  calls = []
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA()
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [(["figlet", "MFA: 42"], True)]
+@
+
+If [[figlet]] is unavailable, we still expose the number through
+standard output.
+<<test functions>>=
+def test_print_used_when_figlet_is_unavailable(
+    monkeypatch, capsys):
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    raise FileNotFoundError
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA()
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert capsys.readouterr().out == "MFA: 42\n"
 @

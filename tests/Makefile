@@ -10,9 +10,24 @@ endef
 
 TESTS=	$(shell ${find_tests})
 
+LIVE_MARK_EXPR=	-m "live"
+NONLIVE_MARK_EXPR=	-m "not live"
+
 .PHONY: all
 all: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
-	poetry run pytest ${PYTESTFLAGS}
+	poetry run pytest ${NONLIVE_MARK_EXPR} ${PYTESTFLAGS}
+
+.PHONY: live
+live: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
+	poetry run pytest ${LIVE_MARK_EXPR} ${PYTESTFLAGS}
+
+.PHONY: live-kth
+live-kth: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
+	poetry run pytest -m "kth_live" ${PYTESTFLAGS}
+
+.PHONY: live-ladok
+live-ladok: $(foreach files,${TESTS},$(shell echo ${files} | cut -d: -f1))
+	poetry run pytest -m "ladok_live" ${PYTESTFLAGS}
 
 $(foreach files,${TESTS},$(eval $(call def_target, ${files})))
 
