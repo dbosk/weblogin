@@ -97,32 +97,101 @@ We need two more handlers in this case, one for the SAML implementation
 ([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the 
 institution ([[weblogin.kth.UGlogin]] below).
 <<test [[ladok.py]]>>=
-import weblogin
-from weblogin import kth, ladok
+import json
 import os
+
+import pytest
 import requests
+import weblogin
+from weblogin import kth, ladok, microsoft
 
-def test_get_user_info():
-  ls = weblogin.AutologinSession([
+pytestmark = [pytest.mark.live, pytest.mark.ladok_live]
+
+def make_ladok_request(session):
+  <<set up headers for API request>>
+
+  return session.get(
+    "https://www.start.ladok.se/gui/proxy"
+      "/kataloginformation/internal/anvandare/anvandarinformation",
+    headers=headers
+  )
+
+def make_test_environment_ladok_request(session):
+  <<set up headers for API request>>
+
+  return session.get(
+    "https://www.test.ladok.se/gui/proxy"
+      "/kataloginformation/internal/anvandare/anvandarinformation",
+    headers=headers
+  )
+
+def assert_ladok_user_info_response(response):
+  <<assert we got LADOK JSON rather than an HTML page>>
+
+  data = response.json()
+  assert data["Epost"] == "dbosk@kth.se"
+
+@pytest.fixture(scope="session")
+def ladok_live_session():
+  session = weblogin.AutologinSession([
         ladok.SSOlogin("KTH Royal Institute of Technology"),
         kth.SAMLlogin(),
-        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"]),
+        microsoft.AzureMFA(url="https://login.ug.kth.se",
+                           notification_cmd="notify-send")
       ])
+  return session
 
-  <<make a request using ls>>
-  <<assert correctness of response>>
+@pytest.fixture(scope="session")
+def ladok_sso_live_session():
+  session = weblogin.AutologinSession([
+          ladok.SSOlogin("KTH Royal Institute of Technology",
+                         vars={
+                           "username":
+                             f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                           "password": os.environ["KTH_PASSWD"]
+                         }),
+          microsoft.AzureMFA(url="https://login.ug.kth.se",
+                             notification_cmd="notify-send")
+        ])
+  return session
 
-def test_multiple_calls():
-  ls = weblogin.AutologinSession([
-        ladok.SSOlogin("KTH Royal Institute of Technology"),
+@pytest.fixture(scope="session")
+def ladok_test_environment_live_session():
+  session = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology",
+                       test_environment=True),
         kth.SAMLlogin(),
-        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
+        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"]),
+        microsoft.AzureMFA(url="https://login.ug.kth.se",
+                           notification_cmd="notify-send")
       ])
+  return session
 
-  <<make a request using ls>>
-  <<assert correctness of response>>
-  <<make a request using ls>>
-  <<assert correctness of response>>
+@pytest.fixture(scope="session")
+def ladok_test_environment_sso_live_session():
+  session = weblogin.AutologinSession([
+        ladok.SSOlogin("KTH Royal Institute of Technology",
+                       vars={
+                         "username":
+                           f"{os.environ['KTH_LOGIN']}@ug.kth.se",
+                         "password": os.environ["KTH_PASSWD"]
+                       },
+                       test_environment=True),
+        microsoft.AzureMFA(url="https://login.ug.kth.se",
+                           notification_cmd="notify-send")
+      ])
+  return session
+
+def test_get_user_info(ladok_live_session):
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
+
+def test_multiple_calls(ladok_live_session):
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
 
 <<more test functions>>
 @
@@ -132,13 +201,7 @@ The API request in question is a request for data about the currently logged-in
 user.
 This means that we must set up some headers and then make the request.
 <<make a request using ls>>=
-<<set up headers for API request>>
-
-response = ls.get(
-  "https://www.start.ladok.se/gui/proxy"
-    "/kataloginformation/internal/anvandare/anvandarinformation",
-  headers=headers
-)
+response = make_ladok_request(ls)
 @
 
 The headers are then:
@@ -155,9 +218,34 @@ Once we've made the request, we must assert that the response is what is
 expected.
 In this case, the email entry should be the same as the author's institution 
 email address.
+When LADOK returns an HTML page instead of the expected JSON API payload, the
+old test failed deep inside [[response.json()]] and hid the useful context.
+For live debugging we instead surface the final URL, content type and a short
+body preview so that endpoint and authentication changes are visible directly in
+the test failure.
 <<assert correctness of response>>=
-assert response.status_code == requests.codes.ok \
-    and response.json()["Epost"] == "dbosk@kth.se"
+assert_ladok_user_info_response(response)
+@
+
+<<assert we got LADOK JSON rather than an HTML page>>=
+assert response.status_code == requests.codes.ok, \
+    f"unexpected status {response.status_code} for {response.url}"
+
+content_type = response.headers.get("Content-Type", "")
+body_preview = response.text[:400]
+
+assert "json" in content_type.casefold(), (
+  f"expected JSON from {response.url}, got Content-Type {content_type!r}. "
+  f"Body starts with: {body_preview!r}"
+)
+
+try:
+  data = response.json()
+except json.JSONDecodeError as err:
+  raise AssertionError(
+    f"failed to decode JSON from {response.url} with Content-Type "
+    f"{content_type!r}. Body starts with: {body_preview!r}"
+  ) from err
 @
 
 \subsection{Check if we need to log in to LADOK}
@@ -200,27 +288,17 @@ self.__login_url = f"{self.__base_url}/gui/loggain"
 
 We test if this works.
 <<more test functions>>=
-def test_test_environment():
-  ls = weblogin.AutologinSession([
-        ladok.SSOlogin("KTH Royal Institute of Technology",
-                       test_environment=True),
-        kth.SAMLlogin(),
-        kth.UGlogin(os.environ["KTH_LOGIN"], os.environ["KTH_PASSWD"])
-      ])
-
-  <<set up headers for API request>>
-  <<make a request to the test environment using ls>>
+def test_test_environment(ladok_test_environment_live_session):
+  response = make_test_environment_ladok_request(
+    ladok_test_environment_live_session
+  )
   <<assert correctness of response>>
 @
 
 Now, this request is going to be very similar to
 [[<<make a request using ls>>]] from above, we just change the URL.
 <<make a request to the test environment using ls>>=
-response = ls.get(
-  "https://www.test.ladok.se/gui/proxy"
-    "/kataloginformation/internal/anvandare/anvandarinformation",
-  headers=headers
-)
+response = make_test_environment_ladok_request(ls)
 @
 
 
@@ -334,45 +412,25 @@ simply change the keys in the dictionary:
 
 We can modify the test above to skip the KTH-specific handlers that we 
 added, otherwise it remains the same.
+Even in this reduced configuration, we still add [[AzureMFA]] so
+that Microsoft's number-matching step can be completed during a
+successful live login.
 <<more test functions>>=
-def test_no_KTH_specific_handler():
-  ls = weblogin.AutologinSession([
-          ladok.SSOlogin("KTH Royal Institute of Technology",
-                         vars={
-                           "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
-                           "password": os.environ["KTH_PASSWD"]
-                         })
-        ])
-
-  <<make a request using ls>>
+def test_no_KTH_specific_handler(ladok_sso_live_session):
+  response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
 
-def test_SSOlogin_multiple_requests():
-  ls = weblogin.AutologinSession([
-          ladok.SSOlogin("KTH Royal Institute of Technology",
-                         vars={
-                           "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
-                           "password": os.environ["KTH_PASSWD"]
-                         })
-        ])
-
-  <<make a request using ls>>
+def test_SSOlogin_multiple_requests(ladok_sso_live_session):
+  response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
-  <<make a request using ls>>
+  response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
 
-def test_test_environment_SSOlogin():
-  ls = weblogin.AutologinSession([
-        ladok.SSOlogin("KTH Royal Institute of Technology",
-                       vars={
-                         "username": f"{os.environ['KTH_LOGIN']}@ug.kth.se",
-                         "password": os.environ["KTH_PASSWD"]
-                       },
-                       test_environment=True)
-      ])
-
-  <<set up headers for API request>>
-  <<make a request to the test environment using ls>>
+def test_test_environment_SSOlogin(
+    ladok_test_environment_sso_live_session):
+  response = make_test_environment_ladok_request(
+    ladok_test_environment_sso_live_session
+  )
   <<assert correctness of response>>
 @
 
@@ -707,4 +765,3 @@ except weblogin.AuthenticationError as err:
 
 print(r"\end{verbatim}")
 \end{pycode}
-
