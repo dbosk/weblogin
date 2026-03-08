@@ -58,6 +58,57 @@ class AutologinSession(requests.Session):
     <<log in if necessary>>
 
     return response
+
+  def add_handler(self, handler):
+    """Add a handler unless an equal one is already present.
+
+    Returns the session for method chaining.
+    """
+    if handler not in self.__handlers:
+      self.__handlers.append(handler)
+    return self
+@
+
+\subsection{Adding handlers to a session}
+
+When a session is shared across programs or modules, each caller may need
+to register its own handler.
+The [[add_handler]] method uses the [[in]] operator---which relies on the
+[[__eq__]] defined in \cref{HandlerEquality}---to skip duplicates
+silently.
+The O(n) scan is fine because handler lists are tiny (typically 2--4
+entries).
+
+Returning [[self]] enables fluent chaining:
+\begin{verbatim}
+session.add_handler(h1).add_handler(h2)
+\end{verbatim}
+
+Let's verify that [[add_handler]] adds new handlers, skips duplicates,
+and returns the session for chaining.
+
+<<test functions>>=
+def test_add_handler_adds():
+    session = AutologinSession([])
+    session.add_handler(DummyHandler("x"))
+    assert DummyHandler("x") in \
+        session._AutologinSession__handlers
+
+def test_add_handler_deduplicates():
+    session = AutologinSession([DummyHandler("x")])
+    session.add_handler(DummyHandler("x"))
+    assert len(session._AutologinSession__handlers) == 1
+
+def test_add_handler_returns_session():
+    session = AutologinSession([])
+    result = session.add_handler(DummyHandler("x"))
+    assert result is session
+
+def test_add_handler_allows_different_handlers():
+    session = AutologinSession([])
+    session.add_handler(DummyHandler("x"))
+    session.add_handler(OtherHandler("x"))
+    assert len(session._AutologinSession__handlers) == 2
 @
 
 \subsection{Pickling an [[AutologinSession]] object}
@@ -104,6 +155,126 @@ class AutologinHandler:
     returns True if needed.
     """
     raise NotImplementedError()
+
+  <<handler equality>>
+@
+
+We test using minimal dummy handlers that extend [[AutologinHandler]],
+avoiding any dependency on live authentication services.
+
+<<test [[init.py]]>>=
+from weblogin import AutologinHandler, AutologinSession
+
+class DummyHandler(AutologinHandler):
+    """Minimal handler for testing equality."""
+    def __init__(self, value):
+        self.value = value
+    def login(self, session, response, args=None, kwargs=None):
+        pass
+    def need_login(self, response):
+        return False
+
+class OtherHandler(AutologinHandler):
+    """A different handler type for cross-type tests."""
+    def __init__(self, value):
+        self.value = value
+    def login(self, session, response, args=None, kwargs=None):
+        pass
+    def need_login(self, response):
+        return False
+
+<<test functions>>
+@
+
+\subsection{Handler equality}\label{HandlerEquality}
+
+When sessions are reused across programs, callers need to add handlers
+without duplicating ones already present.
+This requires value-based equality: two handlers should be equal when they
+have the same type and the same configuration, regardless of object
+identity.
+
+We implement [[__eq__]] and [[__hash__]] generically in the base class
+rather than in each subclass.
+This avoids repetition and means new handler subclasses get equality for
+free.
+We compare [[__dict__]] contents, but exclude keys ending with
+[[__logging_in]] because that flag is transient request-cycle state, not
+part of a handler's identity.
+
+We use [[type()]] rather than [[isinstance()]] for the type check to
+prevent cross-class false positives---a [[UGlogin]] should never equal a
+[[SAMLlogin]], even if they happened to share attribute values.
+<<handler equality>>=
+def __eq__(self, other):
+    """Value-based equality on handler type and configuration."""
+    if type(self) != type(other):
+        return False
+    def _config(obj):
+        return {k: v for k, v in obj.__dict__.items()
+                if not k.endswith("__logging_in")}
+    return _config(self) == _config(other)
+
+def __hash__(self):
+    """Hash based on handler type and configuration."""
+    def _freeze(value):
+        if isinstance(value, dict):
+            return frozenset(
+                (k, _freeze(v)) for k, v in value.items()
+            )
+        if isinstance(value, list):
+            return tuple(_freeze(v) for v in value)
+        return value
+
+    items = {k: v for k, v in self.__dict__.items()
+             if not k.endswith("__logging_in")}
+    return hash(
+        (type(self),
+         frozenset(
+             (k, _freeze(v)) for k, v in items.items()
+         ))
+    )
+@
+
+The [[_freeze]] helper converts mutable values---such as the [[vars]]
+dictionary in [[SSOlogin]]---into hashable frozen equivalents
+(dictionaries become frozensets, lists become tuples).
+Without this, [[__hash__]] would raise [[TypeError]] for handlers with
+mutable configuration attributes.
+
+These properties ensure that [[add_handler]] can detect duplicates
+correctly: same-configuration handlers are recognized as equal, while
+handlers with different values or types remain distinct.
+
+<<test functions>>=
+def test_equal_handlers():
+    assert DummyHandler("x") == DummyHandler("x")
+
+def test_different_values_not_equal():
+    assert DummyHandler("x") != DummyHandler("y")
+
+def test_different_types_not_equal():
+    assert DummyHandler("x") != OtherHandler("x")
+@
+
+Equal handlers must also hash identically so they work correctly in sets
+and dictionaries.
+
+<<test functions>>=
+def test_equal_handlers_same_hash():
+    assert hash(DummyHandler("x")) == hash(DummyHandler("x"))
+@
+
+The transient [[__logging_in]] flag must not affect equality.
+We simulate this by manually setting the flag with the name-mangled key.
+
+<<test functions>>=
+def test_logging_in_excluded_from_equality():
+    h1 = DummyHandler("x")
+    h2 = DummyHandler("x")
+    h1._DummyHandler__logging_in = True
+    h2._DummyHandler__logging_in = False
+    assert h1 == h2
 @
 
 \subsection{Errors}
