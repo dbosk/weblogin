@@ -105,6 +105,27 @@ import requests
 import weblogin
 from weblogin import kth, ladok, microsoft
 
+class TrackingUGlogin(kth.UGlogin):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.password_form_logins = 0
+
+  def login(self, session, response, args=None, kwargs=None):
+    if response.url.startswith(self.LOGIN_URL) and (
+        'id="loginForm"' in response.text
+        or "id='loginForm'" in response.text):
+      self.password_form_logins += 1
+    return super().login(session, response, args, kwargs)
+
+class TrackingAzureMFA(microsoft.AzureMFA):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.challenge_count = 0
+
+  def login(self, session, response, args=None, kwargs=None):
+    self.challenge_count += 1
+    return super().login(session, response, args, kwargs)
+
 pytestmark = [pytest.mark.live, pytest.mark.ladok_live]
 
 def make_ladok_request(session):
@@ -193,8 +214,48 @@ def test_multiple_calls(ladok_live_session):
   response = make_ladok_request(ladok_live_session)
   assert_ladok_user_info_response(response)
 
+def test_reuse_UG_session_for_LADOK_login():
+  ug = TrackingUGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    "https://app.kth.se/ug-gruppeditor/"
+  )
+  mfa = TrackingAzureMFA(
+    url="https://login.ug.kth.se",
+    notification_cmd="notify-send"
+  )
+  session = weblogin.AutologinSession([
+    ladok.SSOlogin("KTH Royal Institute of Technology"),
+    kth.SAMLlogin(),
+    ug,
+    mfa
+  ])
+
+  kth_response = session.get("https://app.kth.se/ug-gruppeditor/")
+  assert kth_response.status_code == requests.codes.ok and \
+      kth_response.url.startswith("https://app.kth.se")
+
+  ug.password_form_logins = 0
+  mfa.challenge_count = 0
+
+  response = make_ladok_request(session)
+  assert_ladok_user_info_response(response)
+  assert ug.password_form_logins == 0
+  assert mfa.challenge_count == 0
+
 <<more test functions>>
 @
+
+We add two small tracking subclasses for the live regression above.
+They let us verify the precise property we care about on the second
+step---that a session already authenticated to [[login.ug.kth.se]] can
+continue into LADOK without seeing the UG password form or Microsoft's
+MFA challenge again.
+
+The regression test itself uses a fresh session instead of the shared
+fixtures.
+That keeps earlier live tests from pre-populating cookies and masking a
+broken hand-off between KTH and LADOK.
 
 We will use an API request to test that this actually works.
 The API request in question is a request for data about the currently logged-in 
