@@ -67,6 +67,8 @@ class UGlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to login server>>
 
+  <<helper methods for nested login retry>>
+
   def login(self, session, response, args=[], kwargs={}):
     """
     Performs a login based on the response `response` from a request to session 
@@ -77,10 +79,10 @@ class UGlogin(weblogin.AutologinHandler):
     Raises an AuthenticationError exception if authentication fails.
     """
     self.__logging_in = True
+    request_already_rerun = False
     <<log in to login server, produce new response>>
-    self.__logging_in = False
 
-    if self.__rerun_requests and args:
+    if self.__rerun_requests and args and not request_already_rerun:
       return session.request(*args, **kwargs)
     return final_response
 @
@@ -156,6 +158,35 @@ response.url.startswith(self.LOGIN_URL) and \
        for r in response.history))
 @
 
+When LADOK reuses a session that is already authenticated against KTH, the
+redirect chain can briefly revisit the UG login form before the original
+request is replayed.
+This is the critical contrast: for a fresh login, 
+seeing the same form again usually means 
+that the credentials were rejected, but in a shared session the same page can
+be only an intermediate stop in a larger federated round-trip.
+If we raise an authentication error too early, we misclassify a reusable KTH
+session as broken and force the caller to re-enter credentials or MFA.
+So we separate [[still on the login form]] from
+[[authentication really failed]].
+<<helper methods for nested login retry>>=
+def _has_login_form(self, response):
+  """Return True if ``response`` still shows the KTH login form."""
+  if not response.text:
+    return False
+
+  doc_tree = html.fromstring(response.text)
+  return len(doc_tree.xpath("//form[@id='loginForm']")) > 0
+
+def _retry_after_login(self, session, args, kwargs):
+  """Retry the original request or the trigger URL after login."""
+  if args:
+    return session.request(*args, **kwargs)
+  if self.__login_trigger_url:
+    return session.get(self.__login_trigger_url)
+  return None
+@
+
 \subsection{Log in at KTH}\label{LoginAtKTH}
 
 If we need to log in, we have three cases:
@@ -173,13 +204,21 @@ If we got the first case (\cref{UGunauthorized}), we called an API URL which
 gave a 401 unauthorized or 403 forbidden response, we want to use the 
 [[login_trigger_url]] to get into the second case (\cref{UGloginPage}).
 In the second case, response will contain the login page.
-We just need to fill the login form and submit it.
+We usually fill the login form and submit it.
 In the third case (\cref{UGsaml}), we just want to continue the redirect.
+The subtlety is that shared sessions combine these cases: a request that began
+inside LADOK may temporarily look like a failed UG login even though replaying
+the original request would succeed.
+We therefore keep the whole login procedure inside a single [[try]] block and
+delay failure decisions until we have enough evidence.
 <<log in to login server, produce new response>>=
-if response.status_code in self.UNAUTH_STATUS_CODES:
-  <<trigger redirect to login page>>
-else:
-  <<parse login page, post login form, or handle SAML request>>
+try:
+  if response.status_code in self.UNAUTH_STATUS_CODES:
+    <<trigger redirect to login page>>
+  else:
+    <<parse login page, post login form, or handle SAML request>>
+finally:
+  self.__logging_in = False
 @
 
 In the case where we just get the unauthorized, we have to simulate a redirect.
@@ -190,7 +229,7 @@ When we've done that, we must re-run the original request (the one that didn't
 trigger a redirect) and return the reply from the new request.
 <<trigger redirect to login page>>=
 trigger_response = session.get(self.__login_trigger_url)
-login_response = self.login(session, trigger_response)
+final_response = self.login(session, trigger_response)
 @
 
 Now, the remaining case, we must distinguish between three cases:
@@ -241,14 +280,32 @@ if login_response.status_code != requests.codes.ok:
     f"authentication as {self.__username} to {login_response.url} failed: "
     f"{login_response.text}")
 
-login_doc_tree = html.fromstring(login_response.text)
-login_form = login_doc_tree.xpath("//form[@id='loginForm']")
-if len(login_form) > 0:
-  raise weblogin.AuthenticationError(
-    f"authentication as {self.__username} failed (redirect to same page), "
-    f"probably wrong username or password.")
+<<check whether login page really means failure>>
+@
 
-final_response = login_response
+Usually, seeing the login form again after credential submission means the
+username or password was wrong.
+That is the ordinary single-service case, and we still want to reject it.
+In a shared session, however, the form can also be a transient page in a
+larger federated flow where the next replay of the original request succeeds
+using cookies obtained during the round-trip.
+The extra replay is therefore not a blind retry for robustness; it is a
+semantic check that distinguishes 
+an actually rejected login from a session that only needs to resume the
+original request.
+Once we have already replayed that request here, the outer [[login]] method
+must not replay it a second time.
+<<check whether login page really means failure>>=
+if self._has_login_form(login_response):
+  retry_response = self._retry_after_login(session, args, kwargs)
+  if retry_response is None or self._has_login_form(retry_response):
+    raise weblogin.AuthenticationError(
+      f"authentication as {self.__username} failed (redirect to same page), "
+      f"probably wrong username or password.")
+  final_response = retry_response
+  request_already_rerun = bool(args)
+else:
+  final_response = login_response
 @
 
 If we land here, there is no [[loginForm]].
@@ -307,6 +364,7 @@ Because these are live tests against the real KTH services, we keep a single
 session-scoped fixture and reuse it across the module.
 <<test [[kth.py]]>>=
 import os
+from unittest import mock
 
 import pytest
 import requests
@@ -399,6 +457,67 @@ def test_auth_fail():
     assert True
   else:
     assert False
+@
+
+The live tests above show that KTH services still work end to end.
+We also want a focused regression test for the narrower failure mode that broke
+LADOK: after submitting credentials, a shared session can briefly land on the
+UG login page again before replaying the original request successfully.
+That sequence should count as success rather than as an immediate credential
+failure.
+<<more test functions>>=
+def test_shared_session_retry_after_nested_login_form():
+  ug = UGlogin("dbosk", "secret", "https://app.kth.se/ug-gruppeditor/")
+  session = weblogin.AutologinSession([ug])
+
+  login_page = requests.Response()
+  login_page.status_code = requests.codes.ok
+  login_page.url = "https://login.ug.kth.se/"
+  login_page._content = b"""<html><body>
+    <form id='loginForm' method='post' action='login'>
+      <input name='csrf' value='token'>
+    </form>
+  </body></html>"""
+  login_page.history = []
+
+  still_login_page = requests.Response()
+  still_login_page.status_code = requests.codes.ok
+  still_login_page.url = "https://login.ug.kth.se/"
+  still_login_page._content = login_page.content
+  still_login_page.history = []
+
+  app_response = requests.Response()
+  app_response.status_code = requests.codes.ok
+  app_response.url = "https://app.kth.se/ug-gruppeditor/"
+  app_response._content = b"ok"
+  app_response.history = []
+
+  with mock.patch.object(
+      session,
+      "request",
+      side_effect=[still_login_page, app_response],
+      autospec=True,
+  ) as request_mock:
+    response = ug.login(
+      session,
+      login_page,
+      args=("GET", "https://www.start.ladok.se/gui/proxy/student"),
+      kwargs={"headers": {"Accept": "application/json"}},
+    )
+
+  assert response is app_response
+  first_call = request_mock.call_args_list[0]
+  assert first_call.args[0] == "POST"
+  assert first_call.args[1] == "https://login.ug.kth.se/login"
+  assert first_call.kwargs["data"]["UserName"] == "dbosk@ug.kth.se"
+  assert first_call.kwargs["data"]["Password"] == "secret"
+
+  second_call = request_mock.call_args_list[1]
+  assert second_call.args == (
+    "GET",
+    "https://www.start.ladok.se/gui/proxy/student",
+  )
+  assert second_call.kwargs == {"headers": {"Accept": "application/json"}}
 @
 
 
