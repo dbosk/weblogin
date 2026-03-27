@@ -71,8 +71,10 @@ class SSOlogin(weblogin.AutologinHandler):
     Raises an AuthenticationError exception if authentication fails.
     """
     self.__logging_in = True
-    <<log in to login server>>
-    self.__logging_in = False
+    try:
+      <<log in to login server>>
+    finally:
+      self.__logging_in = False
 
     if args and response.history:
       return session.request(*args, **kwargs)
@@ -83,6 +85,9 @@ We note that while we're logging in, we don't want those requests interrupted
 by another login session.
 Hence, we block any new login procedures from starting by setting 
 [[self.__logging_in]].
+That guard is temporary runtime state only. If any LADOK login step raises, we
+must still clear it before returning control to the caller; otherwise later
+redirects would be ignored as if the old login were still in progress.
 
 \subsection{Tests and intended usage}
 
@@ -753,6 +758,31 @@ def test_SSOlogin_infinite_loop_no_credentials():
     assert "infinite loop" in str(err)
   else:
     assert False
+@
+
+We also want a focused regression test for exception safety. If the first step
+of LADOK login fails, the handler must still clear [[self.__logging_in]] so that
+the next redirect can trigger a fresh login attempt.
+<<more test functions>>=
+def test_SSOlogin_resets_logging_in_after_exception():
+  handler = ladok.SSOlogin("KTH Royal Institute of Technology")
+
+  class Session:
+    def get(self, url):
+      raise RuntimeError("boom")
+
+  try:
+    handler.login(Session(), object())
+  except RuntimeError:
+    pass
+  else:
+    assert False
+
+  response = requests.Response()
+  response.status_code = requests.codes.unauthorized
+  response.url = "https://start.ladok.se/gui/proxy/student"
+  response.history = []
+  assert handler.need_login(response)
 @
 
 \subsection{Finding which variables to set}\label{DiscoverVariables}

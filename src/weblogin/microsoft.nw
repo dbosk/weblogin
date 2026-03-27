@@ -134,16 +134,19 @@ class AzureMFA(weblogin.AutologinHandler):
     """
     self.__logging_in = True
 
-    <<extract MFA number>>
-    <<notify user of MFA number>>
-    <<wait for MFA approval>>
-
-    self.__logging_in = False
+    try:
+      <<extract MFA number>>
+      <<notify user of MFA number>>
+      <<wait for MFA approval>>
+    finally:
+      self.__logging_in = False
     return final_response
 @
 
 We use the same [[self.__logging_in]] guard as the other handlers
 to prevent re-entrant invocations while we are polling.
+That guard must also be exception-safe: if notification or polling raises, we
+still need later MFA challenges to be detectable.
 
 
 \subsection{Detecting the MFA challenge}\label{AzureMFAURLScope}
@@ -499,6 +502,40 @@ def test_figlet_used_when_no_notification_command(monkeypatch):
   handler.login(object(), MockResponse(MFA_HTML))
 
   assert calls == [(["figlet", "MFA: 42"], True)]
+@
+
+If polling fails, the handler must still leave the re-entrancy guard in a clean
+state so that a later MFA challenge can be handled normally.
+<<test functions>>=
+def test_mfa_resets_logging_in_after_exception(monkeypatch):
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+
+  def fail_request(*args, **kwargs):
+    raise RuntimeError("boom")
+
+  monkeypatch.setattr(
+    microsoft.requests.Session, "request", fail_request
+  )
+  monkeypatch.setattr(
+    microsoft.time, "sleep", lambda seconds: None
+  )
+  monkeypatch.setattr(
+    microsoft.subprocess, "run", lambda *args, **kwargs: None
+  )
+
+  handler = AzureMFA()
+  response = MockResponse(MFA_HTML)
+
+  try:
+    handler.login(object(), response)
+  except RuntimeError:
+    pass
+  else:
+    assert False
+
+  assert handler.need_login(response)
 @
 
 If [[figlet]] is unavailable, we still expose the number through
