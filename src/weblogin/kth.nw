@@ -520,6 +520,38 @@ def test_shared_session_retry_after_nested_login_form():
   assert second_call.kwargs == {"headers": {"Accept": "application/json"}}
 @
 
+The SAML handler uses the same re-entrancy guard as the other handlers, so it
+must clear that guard even when forwarding the SAML form raises an exception.
+<<more test functions>>=
+def test_SAMLlogin_resets_logging_in_after_exception(monkeypatch):
+  handler = weblogin.kth.SAMLlogin()
+  session = weblogin.AutologinSession([handler])
+
+  response = requests.Response()
+  response.status_code = requests.codes.ok
+  response.url = "https://saml-5.sys.kth.se/idp/profile/SAML2/Redirect/SSO"
+  response._content = b"""<html><body>
+    <form method='post' action='next'>
+      <input name='token' value='value'>
+    </form>
+  </body></html>"""
+  response.history = []
+
+  def fail_request(*args, **kwargs):
+    raise RuntimeError("boom")
+
+  monkeypatch.setattr(session, "request", fail_request)
+
+  try:
+    handler.login(session, response)
+  except RuntimeError:
+    pass
+  else:
+    assert False
+
+  assert handler.need_login(response)
+@
+
 
 \section{The SAML login handler for KTH}\label{SAMLhandler}
 
@@ -561,8 +593,10 @@ class SAMLlogin(weblogin.AutologinHandler):
     - Raises an AuthenticationError exception on fails.
     """
     self.__logging_in = True
-    <<run SAML procedure, produce new response>>
-    self.__logging_in = False
+    try:
+      <<run SAML procedure, produce new response>>
+    finally:
+      self.__logging_in = False
 
     if self.__rerun_requests and args:
       return session.request(*args, **kwargs)

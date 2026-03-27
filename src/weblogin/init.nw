@@ -136,6 +136,12 @@ class AutologinHandler:
   An abstract class for a handler for the AutologinSession class.
   """
 
+  def __getstate__(self):
+    <<return handler state for pickling>>
+
+  def __setstate__(self, state):
+    <<restore handler state after unpickling>>
+
   def login(self, session, response, args=None, kwargs=None):
     """
     Performs a login based on the response from a request.
@@ -202,6 +208,14 @@ We compare [[__dict__]] contents, but exclude keys ending with
 [[__logging_in]] because that flag is transient request-cycle state, not
 part of a handler's identity.
 
+That same transient flag must also stay out of persistent state. A handler may
+be pickled after a failed or abandoned authentication flow, precisely when
+[[__logging_in]] is most likely to be true. If we restore that flag unchanged in
+a later process, the handler will mistake a fresh login redirect for a
+re-entrant call and ignore it. We therefore sanitize pickled handler state by
+forcing every attribute ending in [[__logging_in]] back to [[False]] both when
+serializing and when restoring.
+
 We use [[type()]] rather than [[isinstance()]] for the type check to
 prevent cross-class false positives---a [[UGlogin]] should never equal a
 [[SAMLlogin]], even if they happened to share attribute values.
@@ -234,6 +248,30 @@ def __hash__(self):
              (k, _freeze(v)) for k, v in items.items()
          ))
     )
+
+def _reset_transient_state(self, state):
+    """Return ``state`` with transient login flags reset."""
+    sanitized = state.copy()
+    for key in sanitized:
+        if key.endswith("__logging_in"):
+            sanitized[key] = False
+    return sanitized
+
+def __getstate__(self):
+    """Return pickle state without transient login-progress flags."""
+    return self._reset_transient_state(self.__dict__)
+
+def __setstate__(self, state):
+    """Restore pickled state while clearing transient login flags."""
+    self.__dict__.update(self._reset_transient_state(state))
+@
+
+<<return handler state for pickling>>=
+return self._reset_transient_state(self.__dict__)
+@
+
+<<restore handler state after unpickling>>=
+self.__dict__.update(self._reset_transient_state(state))
 @
 
 The [[_freeze]] helper converts mutable values---such as the [[vars]]
@@ -275,6 +313,42 @@ def test_logging_in_excluded_from_equality():
     h1._DummyHandler__logging_in = True
     h2._DummyHandler__logging_in = False
     assert h1 == h2
+@
+
+The same transient flag must not survive pickling. Otherwise a restored handler
+would believe it were still inside an earlier login attempt.
+
+<<test [[init.py]]>>=
+import pickle
+from weblogin import AutologinHandler, AutologinSession
+
+class DummyHandler(AutologinHandler):
+    """Minimal handler for testing equality."""
+    def __init__(self, value):
+        self.value = value
+    def login(self, session, response, args=None, kwargs=None):
+        pass
+    def need_login(self, response):
+        return False
+
+class OtherHandler(AutologinHandler):
+    """A different handler type for cross-type tests."""
+    def __init__(self, value):
+        self.value = value
+    def login(self, session, response, args=None, kwargs=None):
+        pass
+    def need_login(self, response):
+        return False
+
+<<test functions>>
+@
+
+<<test functions>>=
+def test_logging_in_reset_during_pickling():
+    handler = DummyHandler("x")
+    handler._DummyHandler__logging_in = True
+    restored = pickle.loads(pickle.dumps(handler))
+    assert restored._DummyHandler__logging_in is False
 @
 
 \subsection{Errors}
