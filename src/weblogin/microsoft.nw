@@ -148,6 +148,63 @@ to prevent re-entrant invocations while we are polling.
 That guard must also be exception-safe: if notification or polling raises, we
 still need later MFA challenges to be detectable.
 
+The tests use mock responses because a live integration test would
+require real MFA interaction.
+
+<<test [[microsoft.py]]>>=
+import weblogin
+import weblogin.microsoft as microsoft
+from weblogin.microsoft import AzureMFA
+
+MFA_HTML = """
+<html><body>
+<form method="POST" action="/common/SAS/ProcessAuth">
+  <input name="AzureMfaAuthentication" value="token123" />
+  <input name="Context" value="ctx456" />
+  <p id="validEntropyNumber">42</p>
+</form>
+</body></html>
+"""
+
+NO_MFA_HTML = """
+<html><body>
+<form method="POST" action="/login">
+  <input name="username" value="" />
+  <input name="password" value="" />
+</form>
+</body></html>
+"""
+
+RESOLVED_HTML = """
+<html><body>
+<p>Approved</p>
+</body></html>
+"""
+
+class MockResponse:
+  def __init__(self, text,
+               url="https://login.ug.kth.se/auth",
+               status_code=200):
+    self.text = text
+    self.url = url
+    self.status_code = status_code
+    self.history = []
+
+def stub_successful_mfa_poll(monkeypatch):
+  monkeypatch.setattr(
+    microsoft.time, "sleep", lambda seconds: None
+  )
+
+  def fake_request(session, method, url, data=None):
+    return MockResponse(RESOLVED_HTML, url=url)
+
+  monkeypatch.setattr(
+    microsoft.requests.Session, "request", fake_request
+  )
+
+<<test functions>>
+@
+
 
 \subsection{Detecting the MFA challenge}\label{AzureMFAURLScope}
 
@@ -174,6 +231,60 @@ elements = doc_tree.xpath(
   f"//p[@id='{self.MFA_ELEMENT_ID}']"
 )
 return len(elements) > 0
+@
+
+We can verify the detection logic with small mock pages.
+
+<<test functions>>=
+def test_mfa_detected():
+  handler = AzureMFA()
+  response = MockResponse(MFA_HTML)
+  assert handler.need_login(response)
+@
+
+When a URL scope is provided and the response URL matches, the
+challenge should still be detected.
+
+<<test functions>>=
+def test_mfa_detected_with_matching_url():
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://login.ug.kth.se/auth"
+  )
+  assert handler.need_login(response)
+@
+
+Conversely, a response from a different domain must not trigger
+the handler, even if the HTML contains the element.
+This is the core security property of URL scoping.
+
+<<test functions>>=
+def test_mfa_not_detected_wrong_url():
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://evil.example.com/phish"
+  )
+  assert not handler.need_login(response)
+@
+
+A page without the MFA element should not trigger the handler.
+
+<<test functions>>=
+def test_mfa_not_detected_no_element():
+  handler = AzureMFA()
+  response = MockResponse(NO_MFA_HTML)
+  assert not handler.need_login(response)
+@
+
+An empty response body should be handled gracefully.
+
+<<test functions>>=
+def test_mfa_not_detected_empty_response():
+  handler = AzureMFA()
+  response = MockResponse("")
+  assert not handler.need_login(response)
 @
 
 
@@ -237,6 +348,105 @@ else:
     subprocess.run(["figlet", mfa_message], check=True)
   except FileNotFoundError:
     print(mfa_message)
+@
+
+The notification path is sensitive to process environment, so the
+tests explicitly set or unset [[WEBLOGIN_MFA_NOTIFICATION]].
+This prevents a developer's shell configuration from changing test
+outcomes.
+
+When no environment override is present, the constructor's
+[[notification_cmd]] should be used.
+
+<<test functions>>=
+def test_notification_cmd_used_when_env_is_unset(monkeypatch):
+  calls = []
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA(
+    notification_cmd="notify-send 'Azure MFA'"
+  )
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [
+    (["notify-send", "Azure MFA", "MFA: 42"], False)
+  ]
+@
+
+If the environment variable is set, it overrides the constructor
+argument.
+
+<<test functions>>=
+def test_env_notification_overrides_constructor(monkeypatch):
+  calls = []
+  monkeypatch.setenv(
+    "WEBLOGIN_MFA_NOTIFICATION", "xmessage"
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA(
+    notification_cmd="notify-send 'Azure MFA'"
+  )
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [(["xmessage", "MFA: 42"], False)]
+@
+
+Without either configuration mechanism, we try [[figlet]] before
+falling back further.
+
+<<test functions>>=
+def test_figlet_used_when_no_notification_command(monkeypatch):
+  calls = []
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA()
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert calls == [(["figlet", "MFA: 42"], True)]
+@
+
+If [[figlet]] is unavailable, we still expose the number through
+standard output.
+
+<<test functions>>=
+def test_print_used_when_figlet_is_unavailable(
+    monkeypatch, capsys):
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    raise FileNotFoundError
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA()
+  handler.login(object(), MockResponse(MFA_HTML))
+
+  assert capsys.readouterr().out == "MFA: 42\n"
 @
 
 
@@ -319,193 +529,9 @@ if len(elements) == 0:
   break
 @
 
-
-\subsection{Tests}
-
-A live integration test is impractical since it requires real MFA
-interaction.
-Instead, we use mock response objects to test the detection logic
-in [[need_login]].
-<<test [[microsoft.py]]>>=
-import weblogin
-import weblogin.microsoft as microsoft
-from weblogin.microsoft import AzureMFA
-
-MFA_HTML = """
-<html><body>
-<form method="POST" action="/common/SAS/ProcessAuth">
-  <input name="AzureMfaAuthentication" value="token123" />
-  <input name="Context" value="ctx456" />
-  <p id="validEntropyNumber">42</p>
-</form>
-</body></html>
-"""
-
-NO_MFA_HTML = """
-<html><body>
-<form method="POST" action="/login">
-  <input name="username" value="" />
-  <input name="password" value="" />
-</form>
-</body></html>
-"""
-
-RESOLVED_HTML = """
-<html><body>
-<p>Approved</p>
-</body></html>
-"""
-
-class MockResponse:
-  def __init__(self, text,
-               url="https://login.ug.kth.se/auth",
-               status_code=200):
-    self.text = text
-    self.url = url
-    self.status_code = status_code
-    self.history = []
-
-def stub_successful_mfa_poll(monkeypatch):
-  monkeypatch.setattr(
-    microsoft.time, "sleep", lambda seconds: None
-  )
-
-  def fake_request(session, method, url, data=None):
-    return MockResponse(RESOLVED_HTML, url=url)
-
-  monkeypatch.setattr(
-    microsoft.requests.Session, "request", fake_request
-  )
-
-<<test functions>>
-@
-
-The first test verifies that the handler detects the MFA challenge
-when no URL scope is configured.
-<<test functions>>=
-def test_mfa_detected():
-  handler = AzureMFA()
-  response = MockResponse(MFA_HTML)
-  assert handler.need_login(response)
-@
-
-When a URL scope is provided and the response URL matches, the
-challenge should still be detected.
-<<test functions>>=
-def test_mfa_detected_with_matching_url():
-  handler = AzureMFA(url="https://login.ug.kth.se")
-  response = MockResponse(
-    MFA_HTML,
-    url="https://login.ug.kth.se/auth"
-  )
-  assert handler.need_login(response)
-@
-
-Conversely, a response from a different domain must not trigger
-the handler, even if the HTML contains the element.
-This is the core security property of URL scoping.
-<<test functions>>=
-def test_mfa_not_detected_wrong_url():
-  handler = AzureMFA(url="https://login.ug.kth.se")
-  response = MockResponse(
-    MFA_HTML,
-    url="https://evil.example.com/phish"
-  )
-  assert not handler.need_login(response)
-@
-
-A page without the MFA element should not trigger the handler.
-<<test functions>>=
-def test_mfa_not_detected_no_element():
-  handler = AzureMFA()
-  response = MockResponse(NO_MFA_HTML)
-  assert not handler.need_login(response)
-@
-
-An empty response body should be handled gracefully.
-<<test functions>>=
-def test_mfa_not_detected_empty_response():
-  handler = AzureMFA()
-  response = MockResponse("")
-  assert not handler.need_login(response)
-@
-
-The notification path is sensitive to process environment, so the
-tests explicitly set or unset [[WEBLOGIN_MFA_NOTIFICATION]].
-This prevents a developer's shell configuration from changing test
-outcomes.
-
-When no environment override is present, the constructor's
-[[notification_cmd]] should be used.
-<<test functions>>=
-def test_notification_cmd_used_when_env_is_unset(monkeypatch):
-  calls = []
-  monkeypatch.delenv(
-    "WEBLOGIN_MFA_NOTIFICATION", raising=False
-  )
-  stub_successful_mfa_poll(monkeypatch)
-
-  def fake_run(cmd, check=False):
-    calls.append((cmd, check))
-
-  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
-
-  handler = AzureMFA(
-    notification_cmd="notify-send 'Azure MFA'"
-  )
-  handler.login(object(), MockResponse(MFA_HTML))
-
-  assert calls == [
-    (["notify-send", "Azure MFA", "MFA: 42"], False)
-  ]
-@
-
-If the environment variable is set, it overrides the constructor
-argument.
-<<test functions>>=
-def test_env_notification_overrides_constructor(monkeypatch):
-  calls = []
-  monkeypatch.setenv(
-    "WEBLOGIN_MFA_NOTIFICATION", "xmessage"
-  )
-  stub_successful_mfa_poll(monkeypatch)
-
-  def fake_run(cmd, check=False):
-    calls.append((cmd, check))
-
-  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
-
-  handler = AzureMFA(
-    notification_cmd="notify-send 'Azure MFA'"
-  )
-  handler.login(object(), MockResponse(MFA_HTML))
-
-  assert calls == [(["xmessage", "MFA: 42"], False)]
-@
-
-Without either configuration mechanism, we try [[figlet]] before
-falling back further.
-<<test functions>>=
-def test_figlet_used_when_no_notification_command(monkeypatch):
-  calls = []
-  monkeypatch.delenv(
-    "WEBLOGIN_MFA_NOTIFICATION", raising=False
-  )
-  stub_successful_mfa_poll(monkeypatch)
-
-  def fake_run(cmd, check=False):
-    calls.append((cmd, check))
-
-  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
-
-  handler = AzureMFA()
-  handler.login(object(), MockResponse(MFA_HTML))
-
-  assert calls == [(["figlet", "MFA: 42"], True)]
-@
-
 If polling fails, the handler must still leave the re-entrancy guard in a clean
 state so that a later MFA challenge can be handled normally.
+
 <<test functions>>=
 def test_mfa_resets_logging_in_after_exception(monkeypatch):
   monkeypatch.delenv(
@@ -536,25 +562,4 @@ def test_mfa_resets_logging_in_after_exception(monkeypatch):
     assert False
 
   assert handler.need_login(response)
-@
-
-If [[figlet]] is unavailable, we still expose the number through
-standard output.
-<<test functions>>=
-def test_print_used_when_figlet_is_unavailable(
-    monkeypatch, capsys):
-  monkeypatch.delenv(
-    "WEBLOGIN_MFA_NOTIFICATION", raising=False
-  )
-  stub_successful_mfa_poll(monkeypatch)
-
-  def fake_run(cmd, check=False):
-    raise FileNotFoundError
-
-  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
-
-  handler = AzureMFA()
-  handler.login(object(), MockResponse(MFA_HTML))
-
-  assert capsys.readouterr().out == "MFA: 42\n"
 @
