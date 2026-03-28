@@ -16,7 +16,7 @@ The module is structured as follows.
 <<[[seamlessaccess.py]]>>=
 import requests
 
-<<functions>>
+<<SeamlessAccess lookup functions>>
 @ We will test these functions using the following test script.
 <<test [[seamlessaccess.py]]>>=
 from weblogin.seamlessaccess import *
@@ -26,9 +26,13 @@ from weblogin.seamlessaccess import *
 
 \subsection{Look up an institution by unique ID}\label{LookUpByID}
 
-We can look up an institution by unique ID (what appears to be a SHA1 hash).
-This is simply a GET request resulting in a JSON-formatted response.
-<<functions>>=
+LADOK and similar handlers should not hard-code SeamlessAccess URLs
+throughout their login logic.
+This wrapper keeps that dependency in one place and normalizes a bad
+response into a single exception shape that callers can treat as a
+lookup failure.
+
+<<SeamlessAccess lookup functions>>=
 def get_entity_data_by_id(id):
   """
   Requests entity data from SeamlessAccess.org for entity with unique ID `id`.
@@ -63,9 +67,12 @@ print(r"\end{minted}")
 
 \subsection{Searching for an institution by name}
 
-We can also search for an institution by name.
-This yields a list of JSON objects as in \cref{LookUpByID}.
-<<functions>>=
+Name-based lookup has the same purpose, but returns a list because
+SeamlessAccess can match several institutions.
+The wrapper keeps that API detail local so higher-level handlers can
+decide whether to pick the first match or reject ambiguity.
+
+<<SeamlessAccess lookup functions>>=
 def find_entity_data_by_name(name):
   """
   Searches SeamlessAccess.org for an institution by name `name`.

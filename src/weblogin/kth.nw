@@ -75,7 +75,7 @@ class UGlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to login server>>
 
-  <<helper methods for nested login retry>>
+  <<UG login retry helpers>>
 
   def login(self, session, response, args=[], kwargs={}):
     """
@@ -148,7 +148,7 @@ Without a [[base_url]], we use the broad [["kth.se" in url]] check.
 @
 
 The second check catches direct redirects to [[login.ug.kth.se]]
-(case~\ref{UGloginPage}).
+(\cref{UGloginPage}).
 When a shared session contains multiple [[UGlogin]] handlers, we must
 ensure that only the handler whose service initiated the redirect catches
 it.
@@ -176,7 +176,11 @@ If we raise an authentication error too early, we misclassify a reusable KTH
 session as broken and force the caller to re-enter credentials or MFA.
 So we separate [[still on the login form]] from
 [[authentication really failed]].
-<<helper methods for nested login retry>>=
+
+We factor those two checks into small helpers because they are shared by
+the ordinary UG login path and the shared-session retry path.
+
+<<UG login retry helpers>>=
 def _has_login_form(self, response):
   """Return True if ``response`` still shows the KTH login form."""
   if not response.text:
@@ -184,7 +188,15 @@ def _has_login_form(self, response):
 
   doc_tree = html.fromstring(response.text)
   return len(doc_tree.xpath("//form[@id='loginForm']")) > 0
+@
 
+Replaying the original request is part of the semantics here, not a
+generic retry policy.
+If the login was triggered by an API call, we replay that exact request.
+Otherwise we revisit the configured trigger URL to resume the browser-style
+flow.
+
+<<UG login retry helpers>>=
 def _retry_after_login(self, session, args, kwargs):
   """Retry the original request or the trigger URL after login."""
   if args:
@@ -292,7 +304,7 @@ Let's start with the simple case: parsing the login page and posting the login
 form.
 This will contain the necessary redirects, so we just have to do it and then 
 the final response will redirect to the original page we were after.
-This means that we can simply return the
+This means that the submitted response is the one we usually continue from.
 <<handle UG login procedure>>=
 data = {}
 

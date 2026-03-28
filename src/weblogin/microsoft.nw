@@ -318,14 +318,14 @@ override a program's default without editing code.
 This makes the mechanism completely flexible:
 \begin{description}
 \item[Desktop notification]
-  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="notify-send 'Azure MFA'"}
+  [[WEBLOGIN_MFA_NOTIFICATION="notify-send 'Azure MFA'"]]
 \item[X11 dialog]
-  \texttt{WEBLOGIN\_MFA\_NOTIFICATION=xmessage}
+  [[WEBLOGIN_MFA_NOTIFICATION=xmessage]]
 \item[KDE dialog]
-  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="kdialog -{}-msgbox"}
+  [[WEBLOGIN_MFA_NOTIFICATION="kdialog --msgbox"]]
 \item[Zulip message to phone]
-  \texttt{WEBLOGIN\_MFA\_NOTIFICATION="zulip-send -{}-stream
-  notifications -{}-subject MFA"}
+  [[WEBLOGIN_MFA_NOTIFICATION="zulip-send --stream
+  notifications --subject MFA"]]
 \end{description}
 
 If the variable is not set, we try to display the number using
