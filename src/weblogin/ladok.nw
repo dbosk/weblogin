@@ -89,7 +89,31 @@ That guard is temporary runtime state only. If any LADOK login step raises, we
 must still clear it before returning control to the caller; otherwise later
 redirects would be ignored as if the old login were still in progress.
 
-\subsection{Tests and intended usage}
+We can verify that exception safety directly.
+
+<<test functions>>=
+def test_SSOlogin_resets_logging_in_after_exception():
+  handler = ladok.SSOlogin("KTH Royal Institute of Technology")
+
+  class Session:
+    def get(self, url):
+      raise RuntimeError("boom")
+
+  try:
+    handler.login(Session(), object())
+  except RuntimeError:
+    pass
+  else:
+    assert False
+
+  response = requests.Response()
+  response.status_code = requests.codes.unauthorized
+  response.url = "https://start.ladok.se/gui/proxy/student"
+  response.history = []
+  assert handler.need_login(response)
+@
+
+\subsection{Test infrastructure and intended usage}
 
 We will test this by a simple API call to LADOK.
 We will get the record of the currently logged in user from LADOK.
@@ -109,27 +133,6 @@ import pytest
 import requests
 import weblogin
 from weblogin import kth, ladok, microsoft
-
-class TrackingUGlogin(kth.UGlogin):
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self.password_form_logins = 0
-
-  def login(self, session, response, args=None, kwargs=None):
-    if response.url.startswith(self.LOGIN_URL) and (
-        'id="loginForm"' in response.text
-        or "id='loginForm'" in response.text):
-      self.password_form_logins += 1
-    return super().login(session, response, args, kwargs)
-
-class TrackingAzureMFA(microsoft.AzureMFA):
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self.challenge_count = 0
-
-  def login(self, session, response, args=None, kwargs=None):
-    self.challenge_count += 1
-    return super().login(session, response, args, kwargs)
 
 pytestmark = [pytest.mark.live, pytest.mark.ladok_live]
 
@@ -205,62 +208,12 @@ def ladok_test_environment_sso_live_session():
                        },
                        test_environment=True),
         microsoft.AzureMFA(url="https://login.ug.kth.se",
-                           notification_cmd="notify-send")
+                            notification_cmd="notify-send")
       ])
   return session
 
-def test_get_user_info(ladok_live_session):
-  response = make_ladok_request(ladok_live_session)
-  assert_ladok_user_info_response(response)
-
-def test_multiple_calls(ladok_live_session):
-  response = make_ladok_request(ladok_live_session)
-  assert_ladok_user_info_response(response)
-  response = make_ladok_request(ladok_live_session)
-  assert_ladok_user_info_response(response)
-
-def test_reuse_UG_session_for_LADOK_login():
-  ug = TrackingUGlogin(
-    os.environ["KTH_LOGIN"],
-    os.environ["KTH_PASSWD"],
-    "https://app.kth.se/ug-gruppeditor/"
-  )
-  mfa = TrackingAzureMFA(
-    url="https://login.ug.kth.se",
-    notification_cmd="notify-send"
-  )
-  session = weblogin.AutologinSession([
-    ladok.SSOlogin("KTH Royal Institute of Technology"),
-    kth.SAMLlogin(),
-    ug,
-    mfa
-  ])
-
-  kth_response = session.get("https://app.kth.se/ug-gruppeditor/")
-  assert kth_response.status_code == requests.codes.ok and \
-      kth_response.url.startswith("https://app.kth.se")
-
-  ug.password_form_logins = 0
-  mfa.challenge_count = 0
-
-  response = make_ladok_request(session)
-  assert_ladok_user_info_response(response)
-  assert ug.password_form_logins == 0
-  assert mfa.challenge_count == 0
-
-<<more test functions>>
+<<test functions>>
 @
-
-We add two small tracking subclasses for the live regression above.
-They let us verify the precise property we care about on the second
-step---that a session already authenticated to [[login.ug.kth.se]] can
-continue into LADOK without seeing the UG password form or Microsoft's
-MFA challenge again.
-
-The regression test itself uses a fresh session instead of the shared
-fixtures.
-That keeps earlier live tests from pre-populating cookies and masking a
-broken hand-off between KTH and LADOK.
 
 We will use an API request to test that this actually works.
 The API request in question is a request for data about the currently logged-in 
@@ -353,7 +306,7 @@ self.__login_url = f"{self.__base_url}/gui/loggain"
 @
 
 We test if this works.
-<<more test functions>>=
+<<test functions>>=
 def test_test_environment(ladok_test_environment_live_session):
   response = make_test_environment_ladok_request(
     ladok_test_environment_live_session
@@ -443,6 +396,80 @@ else:
 ladok_response = session.get(return_url)
 @
 
+Once these steps hand control to the university-specific handlers, the
+full login flow should reach the LADOK API successfully.
+
+<<test functions>>=
+def test_get_user_info(ladok_live_session):
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
+
+def test_multiple_calls(ladok_live_session):
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
+  response = make_ladok_request(ladok_live_session)
+  assert_ladok_user_info_response(response)
+@
+
+For the KTH combination, we also want a more specific regression check.
+If the session is already authenticated to KTH, entering LADOK should
+reuse that state rather than showing the UG password form or Microsoft's
+MFA challenge again.
+
+We add two small tracking subclasses for this live regression.
+
+<<test functions>>=
+class TrackingUGlogin(kth.UGlogin):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.password_form_logins = 0
+
+  def login(self, session, response, args=None, kwargs=None):
+    if response.url.startswith(self.LOGIN_URL) and (
+        'id="loginForm"' in response.text
+        or "id='loginForm'" in response.text):
+      self.password_form_logins += 1
+    return super().login(session, response, args, kwargs)
+
+class TrackingAzureMFA(microsoft.AzureMFA):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.challenge_count = 0
+
+  def login(self, session, response, args=None, kwargs=None):
+    self.challenge_count += 1
+    return super().login(session, response, args, kwargs)
+
+def test_reuse_UG_session_for_LADOK_login():
+  ug = TrackingUGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    "https://app.kth.se/ug-gruppeditor/"
+  )
+  mfa = TrackingAzureMFA(
+    url="https://login.ug.kth.se",
+    notification_cmd="notify-send"
+  )
+  session = weblogin.AutologinSession([
+    ladok.SSOlogin("KTH Royal Institute of Technology"),
+    kth.SAMLlogin(),
+    ug,
+    mfa
+  ])
+
+  kth_response = session.get("https://app.kth.se/ug-gruppeditor/")
+  assert kth_response.status_code == requests.codes.ok and \
+      kth_response.url.startswith("https://app.kth.se")
+
+  ug.password_form_logins = 0
+  mfa.challenge_count = 0
+
+  response = make_ladok_request(session)
+  assert_ladok_user_info_response(response)
+  assert ug.password_form_logins == 0
+  assert mfa.challenge_count == 0
+@
+
 \subsection{Log into any university}
 
 Now, here is the trick.
@@ -481,7 +508,7 @@ added, otherwise it remains the same.
 Even in this reduced configuration, we still add [[AzureMFA]] so
 that Microsoft's number-matching step can be completed during a
 successful live login.
-<<more test functions>>=
+<<test functions>>=
 def test_no_KTH_specific_handler(ladok_sso_live_session):
   response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
@@ -501,7 +528,7 @@ def test_test_environment_SSOlogin(
 @
 
 We would also like to test if we can detect failed authentication.
-<<more test functions>>=
+<<test functions>>=
 def test_wrong_credentials():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology",
@@ -724,7 +751,7 @@ Let's test that this works.
 We'll start by providing a wrong password (username as well), so that the login 
 will fail.
 This way we'll get back to the same page over and over.
-<<more test functions>>=
+<<test functions>>=
 def test_SSOlogin_infinite_loop():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology",
@@ -746,7 +773,7 @@ We'll do the same test again, but this time, we don't provide any credentials
 at all.
 This case returned a 500 error when we used [[//input]] instead of [[.//input]] 
 above.
-<<more test functions>>=
+<<test functions>>=
 def test_SSOlogin_infinite_loop_no_credentials():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology")
@@ -758,31 +785,6 @@ def test_SSOlogin_infinite_loop_no_credentials():
     assert "infinite loop" in str(err)
   else:
     assert False
-@
-
-We also want a focused regression test for exception safety. If the first step
-of LADOK login fails, the handler must still clear [[self.__logging_in]] so that
-the next redirect can trigger a fresh login attempt.
-<<more test functions>>=
-def test_SSOlogin_resets_logging_in_after_exception():
-  handler = ladok.SSOlogin("KTH Royal Institute of Technology")
-
-  class Session:
-    def get(self, url):
-      raise RuntimeError("boom")
-
-  try:
-    handler.login(Session(), object())
-  except RuntimeError:
-    pass
-  else:
-    assert False
-
-  response = requests.Response()
-  response.status_code = requests.codes.unauthorized
-  response.url = "https://start.ladok.se/gui/proxy/student"
-  response.history = []
-  assert handler.need_login(response)
 @
 
 \subsection{Finding which variables to set}\label{DiscoverVariables}
