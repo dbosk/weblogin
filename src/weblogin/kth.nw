@@ -47,11 +47,11 @@ class UGlogin(weblogin.AutologinHandler):
     - Requires username and password.
     - Optional ``base_url`` restricts this handler to URLs
       starting with that prefix. When omitted, falls back to
-      ``login_trigger_url`` (backward compatible) or a broad
-      ``kth.se`` check.
+      ``login_trigger_url`` or a broad ``kth.se`` check.
     - Optional ``login_trigger_url`` is a page that redirects
       to the login page, used when API URLs return 401/403
-      without redirecting.
+      without redirecting. When omitted, defaults to
+      ``base_url``.
     - Optional ``rerun_requests`` specifies whether we want to
       rerun the original request that triggered authentication
       failure.
@@ -60,7 +60,8 @@ class UGlogin(weblogin.AutologinHandler):
     self.__username = username
     self.__password = password
     self.__base_url = base_url or login_trigger_url
-    self.__login_trigger_url = login_trigger_url
+    self.__login_trigger_url = (login_trigger_url
+                                or base_url)
     self.__rerun_requests = rerun_requests
     self.__logging_in = False
 
@@ -164,33 +165,6 @@ response.url.startswith(self.LOGIN_URL) and \
        for r in response.history))
 @
 
-The [[base_url]] and [[login_trigger_url]] are deliberately independent:
-[[base_url]] scopes which responses the handler claims, while
-[[login_trigger_url]] is only used to bootstrap a redirect when the API
-returns a bare 401/403.
-This matters when the trigger page lives at a different path than the
-API, for example [[base_url]] could be [[https://app.kth.se/]] while
-[[login_trigger_url]] is [[https://app.kth.se/ug-gruppeditor/]].
-<<more test functions>>=
-def test_base_url_scopes_independently_of_trigger():
-  """base_url controls scoping, login_trigger_url only triggers."""
-  handler = UGlogin(
-    "user", "pass",
-    login_trigger_url="https://app.kth.se/ug-gruppeditor/",
-    base_url="https://app.kth.se/")
-
-  broad_403 = requests.Response()
-  broad_403.status_code = requests.codes.forbidden
-  broad_403.url = "https://app.kth.se/api/other"
-  broad_403.history = []
-  assert handler.need_login(broad_403)
-
-  narrow_handler = UGlogin(
-    "user", "pass",
-    login_trigger_url="https://app.kth.se/ug-gruppeditor/")
-  assert not narrow_handler.need_login(broad_403)
-@
-
 When LADOK reuses a session that is already authenticated against KTH, the
 redirect chain can briefly revisit the UG login form before the original
 request is replayed.
@@ -263,6 +237,33 @@ trigger a redirect) and return the reply from the new request.
 <<trigger redirect to login page>>=
 trigger_response = session.get(self.__login_trigger_url)
 final_response = self.login(session, trigger_response)
+@
+
+The [[base_url]] and [[login_trigger_url]] are deliberately independent:
+[[base_url]] scopes which responses the handler claims, while
+[[login_trigger_url]] is only used to bootstrap a redirect when the API
+returns a bare 401/403.
+This matters when the trigger page lives at a different path than the
+API, for example [[base_url]] could be [[https://app.kth.se/]] while
+[[login_trigger_url]] is [[https://app.kth.se/ug-gruppeditor/]].
+<<more test functions>>=
+def test_base_url_scopes_independently_of_trigger():
+  """base_url controls scoping, login_trigger_url only triggers."""
+  handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/",
+    base_url="https://app.kth.se/")
+
+  broad_403 = requests.Response()
+  broad_403.status_code = requests.codes.forbidden
+  broad_403.url = "https://app.kth.se/api/other"
+  broad_403.history = []
+  assert handler.need_login(broad_403)
+
+  narrow_handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/")
+  assert not narrow_handler.need_login(broad_403)
 @
 
 Now, the remaining case, we must distinguish between three cases:
@@ -439,7 +440,7 @@ def test_get_form_admin(kth_form_live_session):
 When a session has multiple [[UGlogin]] handlers (one per service), each
 handler must only trigger for its own service's URLs.
 Otherwise, the wrong handler catches a 401 from a different service,
-authenticates the wrong trigger URL, and the re-run still returns
+authenticates via the wrong trigger URL, and the re-run still returns
 401---creating an infinite loop.
 This test verifies that a shared session with three handlers (UG editor,
 Forms, and participants) can authenticate to the participants API without
