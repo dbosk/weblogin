@@ -41,18 +41,25 @@ class UGlogin(weblogin.AutologinHandler):
   <<class attributes>>
   
   def __init__(self, username, password, login_trigger_url=None,
-               rerun_requests=False):
+               base_url=None, rerun_requests=False):
     """
     Creates a login handler that automatically logs into KTH.
     - Requires username and password.
-    - Optional `login_trigger_url` is a page that redirects to the login page,
-      for instance, the API URLs don't redirect, but the UI URLs do.
-    - Optional `rerun_requests` specifies whether we want to rerun the original 
-      request that triggered authentication failure.
+    - Optional ``base_url`` restricts this handler to URLs
+      starting with that prefix. When omitted, falls back to
+      ``login_trigger_url`` (backward compatible) or a broad
+      ``kth.se`` check.
+    - Optional ``login_trigger_url`` is a page that redirects
+      to the login page, used when API URLs return 401/403
+      without redirecting.
+    - Optional ``rerun_requests`` specifies whether we want to
+      rerun the original request that triggered authentication
+      failure.
     """
     super().__init__()
     self.__username = username
     self.__password = password
+    self.__base_url = base_url or login_trigger_url
     self.__login_trigger_url = login_trigger_url
     self.__rerun_requests = rerun_requests
     self.__logging_in = False
@@ -105,13 +112,13 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a
 login.
 
-When a [[login_trigger_url]] is set, the handler should only trigger for
-requests whose URL starts with the same base as the trigger URL.
+When a [[base_url]] is set, the handler only triggers for requests whose
+URL starts with that prefix.
 Without this restriction, multiple [[UGlogin]] handlers (for example, one
 per KTH service sharing a session) would all catch any 401 from any
 [[kth.se]] URL, leading to an infinite loop where the wrong handler
 authenticates the wrong service and re-runs the request indefinitely.
-When no [[login_trigger_url]] is set, we fall back to the broad
+When no [[base_url]] is set, we fall back to the broad
 [["kth.se" in url]] check for backward compatibility.
 <<class attributes>>=
 UNAUTH_STATUS_CODES = [
@@ -129,14 +136,13 @@ elif <<should catch login-page redirect>>:
 return False
 @
 
-If a [[login_trigger_url]] is configured, the handler only claims
-responsibility for URLs that share the same origin and path prefix as the
-trigger URL.
+If a [[base_url]] is configured, the handler only claims responsibility
+for URLs that share the same origin and path prefix.
 This ensures that each handler only fires for its own service.
-Without a trigger URL, we use the broad [["kth.se" in url]] check.
+Without a [[base_url]], we use the broad [["kth.se" in url]] check.
 <<URL belongs to this handler's service>>=
-(response.url.startswith(self.__login_trigger_url)
- if self.__login_trigger_url
+(response.url.startswith(self.__base_url)
+ if self.__base_url
  else "kth.se" in response.url)
 @
 
@@ -147,15 +153,42 @@ ensure that only the handler whose service initiated the redirect catches
 it.
 We inspect [[response.history]] (the redirect chain maintained by
 [[requests]]): if any intermediate URL started with this handler's
-[[login_trigger_url]], the redirect originated from our service and we
-should handle it.
-When no [[login_trigger_url]] is set, we accept any redirect to the login
-server for backward compatibility.
+[[base_url]], the redirect originated from our service and we should
+handle it.
+When no [[base_url]] is set, we accept any redirect to the login server
+for backward compatibility.
 <<should catch login-page redirect>>=
 response.url.startswith(self.LOGIN_URL) and \
-  (not self.__login_trigger_url or
-   any(r.url.startswith(self.__login_trigger_url)
+  (not self.__base_url or
+   any(r.url.startswith(self.__base_url)
        for r in response.history))
+@
+
+The [[base_url]] and [[login_trigger_url]] are deliberately independent:
+[[base_url]] scopes which responses the handler claims, while
+[[login_trigger_url]] is only used to bootstrap a redirect when the API
+returns a bare 401/403.
+This matters when the trigger page lives at a different path than the
+API, for example [[base_url]] could be [[https://app.kth.se/]] while
+[[login_trigger_url]] is [[https://app.kth.se/ug-gruppeditor/]].
+<<more test functions>>=
+def test_base_url_scopes_independently_of_trigger():
+  """base_url controls scoping, login_trigger_url only triggers."""
+  handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/",
+    base_url="https://app.kth.se/")
+
+  broad_403 = requests.Response()
+  broad_403.status_code = requests.codes.forbidden
+  broad_403.url = "https://app.kth.se/api/other"
+  broad_403.history = []
+  assert handler.need_login(broad_403)
+
+  narrow_handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/")
+  assert not narrow_handler.need_login(broad_403)
 @
 
 When LADOK reuses a session that is already authenticated against KTH, the
