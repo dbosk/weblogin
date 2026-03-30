@@ -543,6 +543,32 @@ def test_shared_session_participants_api():
   assert "participants" in response.json()
 @
 
+Stay A While still motivates the separation between [[base_url]] and
+[[login_trigger_url]], but plain [[UGlogin]] only covers the KTH login
+layer.
+That means the live regression here should verify that [[UGlogin]] can
+start from the Stay A While [[/login]] page and complete the KTH login
+round-trip.
+The application-specific JWT used by [[/api/api_keys]] is a separate
+layer handled in [[kthutils]], not by [[UGlogin]] itself.
+<<test functions>>=
+def test_stayawhile_login_page():
+  """UGlogin with separate base_url reaches Stay A While login page."""
+  sa = UGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    login_trigger_url="https://queue.eecs.kth.se/login",
+    base_url="https://queue.eecs.kth.se")
+  mfa = weblogin.microsoft.AzureMFA(
+    url="https://login.ug.kth.se",
+    notification_cmd="notify-send")
+
+  session = weblogin.AutologinSession([sa, mfa])
+  response = session.get("https://queue.eecs.kth.se/login")
+  assert response.status_code == requests.codes.ok
+  assert response.url.startswith("https://queue.eecs.kth.se/")
+@
+
 The ordinary failure case should still raise [[AuthenticationError]].
 
 <<test functions>>=
