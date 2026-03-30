@@ -77,11 +77,11 @@ class UGlogin(weblogin.AutologinHandler):
 
   <<UG login retry helpers>>
 
-  def login(self, session, response, args=[], kwargs={}):
+  def login(self, session, response, args=None, kwargs=None):
     """
-    Performs a login based on the response `response` from a request to session 
+    Performs a login based on the response `response` from a request to session
     `session`.
-    `args` and `kwargs` are the options from the request triggering the login 
+    `args` and `kwargs` are the options from the request triggering the login
     procedure, this is so that we can redo that request after logging in.
 
     Raises an AuthenticationError exception if authentication fails.
@@ -91,7 +91,7 @@ class UGlogin(weblogin.AutologinHandler):
     <<log in to login server, produce new response>>
 
     if self.__rerun_requests and args and not request_already_rerun:
-      return session.request(*args, **kwargs)
+      return session.request(*args, **(kwargs or {}))
     return final_response
 @
 
@@ -200,7 +200,7 @@ flow.
 def _retry_after_login(self, session, args, kwargs):
   """Retry the original request or the trigger URL after login."""
   if args:
-    return session.request(*args, **kwargs)
+    return session.request(*args, **(kwargs or {}))
   if self.__login_trigger_url:
     return session.get(self.__login_trigger_url)
   return None
@@ -414,24 +414,6 @@ def test_shared_session_retry_after_nested_login_form():
   assert second_call.kwargs == {"headers": {"Accept": "application/json"}}
 @
 
-The ordinary failure case should still raise [[AuthenticationError]].
-
-<<test functions>>=
-def test_auth_fail():
-  ug = weblogin.AutologinSession([
-      UGlogin("invalid user", "wrong password",
-              "https://app.kth.se/ug-gruppeditor/")
-    ])
-
-  try:
-    ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
-           "?editableBySelf=true")
-  except weblogin.AuthenticationError:
-    assert True
-  else:
-    assert False
-@
-
 If we land here, there is no [[loginForm]].
 We check whether a SAML relay form exists; if so, we forward it.
 Otherwise, if the response is 200~OK, we are already authenticated---the
@@ -561,6 +543,24 @@ def test_shared_session_participants_api():
   assert "participants" in response.json()
 @
 
+The ordinary failure case should still raise [[AuthenticationError]].
+
+<<test functions>>=
+def test_auth_fail():
+  ug = weblogin.AutologinSession([
+      UGlogin("invalid user", "wrong password",
+              "https://app.kth.se/ug-gruppeditor/")
+    ])
+
+  try:
+    ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
+           "?editableBySelf=true")
+  except weblogin.AuthenticationError:
+    assert True
+  else:
+    assert False
+@
+
 
 \section{The SAML login handler for KTH}\label{SAMLhandler}
 
@@ -593,11 +593,11 @@ class SAMLlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to SAML server>>
 
-  def login(self, session, response, args=[], kwargs={}):
+  def login(self, session, response, args=None, kwargs=None):
     """
-    - Performs an action based on the response `response` from a request to 
+    - Performs an action based on the response `response` from a request to
       session `session`.
-    - `args` and `kwargs` are the options from the request triggering the login 
+    - `args` and `kwargs` are the options from the request triggering the login
       procedure, this is so that we can redo that request after logging in.
     - Raises an AuthenticationError exception on fails.
     """
@@ -608,7 +608,7 @@ class SAMLlogin(weblogin.AutologinHandler):
       self.__logging_in = False
 
     if self.__rerun_requests and args:
-      return session.request(*args, **kwargs)
+      return session.request(*args, **(kwargs or {}))
     return saml_response
 @
 

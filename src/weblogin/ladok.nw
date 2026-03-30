@@ -41,7 +41,7 @@ class SSOlogin(weblogin.AutologinHandler):
     """
     Creates a login handler that automates the LADOK part of authentication.
 
-    - Requires `institution`. A string identifying the instutution at 
+    - Requires `institution`. A string identifying the institution at 
       SeamlessAccess.org.
 
     <<SSOlogin args docs>>
@@ -208,7 +208,7 @@ def ladok_test_environment_sso_live_session():
                        },
                        test_environment=True),
         microsoft.AzureMFA(url="https://login.ug.kth.se",
-                            notification_cmd="notify-send")
+                           notification_cmd="notify-send")
       ])
   return session
 
