@@ -41,19 +41,27 @@ class UGlogin(weblogin.AutologinHandler):
   <<class attributes>>
   
   def __init__(self, username, password, login_trigger_url=None,
-               rerun_requests=False):
+               base_url=None, rerun_requests=False):
     """
     Creates a login handler that automatically logs into KTH.
     - Requires username and password.
-    - Optional `login_trigger_url` is a page that redirects to the login page,
-      for instance, the API URLs don't redirect, but the UI URLs do.
-    - Optional `rerun_requests` specifies whether we want to rerun the original 
-      request that triggered authentication failure.
+    - Optional ``base_url`` restricts this handler to URLs
+      starting with that prefix. When omitted, falls back to
+      ``login_trigger_url`` or a broad ``kth.se`` check.
+    - Optional ``login_trigger_url`` is a page that redirects
+      to the login page, used when API URLs return 401/403
+      without redirecting. When omitted, defaults to
+      ``base_url``.
+    - Optional ``rerun_requests`` specifies whether we want to
+      rerun the original request that triggered authentication
+      failure.
     """
     super().__init__()
     self.__username = username
     self.__password = password
-    self.__login_trigger_url = login_trigger_url
+    self.__base_url = base_url or login_trigger_url
+    self.__login_trigger_url = (login_trigger_url
+                                or base_url)
     self.__rerun_requests = rerun_requests
     self.__logging_in = False
 
@@ -67,13 +75,13 @@ class UGlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to login server>>
 
-  <<helper methods for nested login retry>>
+  <<UG login retry helpers>>
 
-  def login(self, session, response, args=[], kwargs={}):
+  def login(self, session, response, args=None, kwargs=None):
     """
-    Performs a login based on the response `response` from a request to session 
+    Performs a login based on the response `response` from a request to session
     `session`.
-    `args` and `kwargs` are the options from the request triggering the login 
+    `args` and `kwargs` are the options from the request triggering the login
     procedure, this is so that we can redo that request after logging in.
 
     Raises an AuthenticationError exception if authentication fails.
@@ -83,7 +91,7 @@ class UGlogin(weblogin.AutologinHandler):
     <<log in to login server, produce new response>>
 
     if self.__rerun_requests and args and not request_already_rerun:
-      return session.request(*args, **kwargs)
+      return session.request(*args, **(kwargs or {}))
     return final_response
 @
 
@@ -105,13 +113,13 @@ the URL to the login service, then we need to log in.
 However, as noted above, this only applies if we're not already underway with a
 login.
 
-When a [[login_trigger_url]] is set, the handler should only trigger for
-requests whose URL starts with the same base as the trigger URL.
+When a [[base_url]] is set, the handler only triggers for requests whose
+URL starts with that prefix.
 Without this restriction, multiple [[UGlogin]] handlers (for example, one
 per KTH service sharing a session) would all catch any 401 from any
 [[kth.se]] URL, leading to an infinite loop where the wrong handler
 authenticates the wrong service and re-runs the request indefinitely.
-When no [[login_trigger_url]] is set, we fall back to the broad
+When no [[base_url]] is set, we fall back to the broad
 [["kth.se" in url]] check for backward compatibility.
 <<class attributes>>=
 UNAUTH_STATUS_CODES = [
@@ -129,32 +137,31 @@ elif <<should catch login-page redirect>>:
 return False
 @
 
-If a [[login_trigger_url]] is configured, the handler only claims
-responsibility for URLs that share the same origin and path prefix as the
-trigger URL.
+If a [[base_url]] is configured, the handler only claims responsibility
+for URLs that share the same origin and path prefix.
 This ensures that each handler only fires for its own service.
-Without a trigger URL, we use the broad [["kth.se" in url]] check.
+Without a [[base_url]], we use the broad [["kth.se" in url]] check.
 <<URL belongs to this handler's service>>=
-(response.url.startswith(self.__login_trigger_url)
- if self.__login_trigger_url
+(response.url.startswith(self.__base_url)
+ if self.__base_url
  else "kth.se" in response.url)
 @
 
 The second check catches direct redirects to [[login.ug.kth.se]]
-(case~\ref{UGloginPage}).
+(\cref{UGloginPage}).
 When a shared session contains multiple [[UGlogin]] handlers, we must
 ensure that only the handler whose service initiated the redirect catches
 it.
 We inspect [[response.history]] (the redirect chain maintained by
 [[requests]]): if any intermediate URL started with this handler's
-[[login_trigger_url]], the redirect originated from our service and we
-should handle it.
-When no [[login_trigger_url]] is set, we accept any redirect to the login
-server for backward compatibility.
+[[base_url]], the redirect originated from our service and we should
+handle it.
+When no [[base_url]] is set, we accept any redirect to the login server
+for backward compatibility.
 <<should catch login-page redirect>>=
 response.url.startswith(self.LOGIN_URL) and \
-  (not self.__login_trigger_url or
-   any(r.url.startswith(self.__login_trigger_url)
+  (not self.__base_url or
+   any(r.url.startswith(self.__base_url)
        for r in response.history))
 @
 
@@ -169,7 +176,11 @@ If we raise an authentication error too early, we misclassify a reusable KTH
 session as broken and force the caller to re-enter credentials or MFA.
 So we separate [[still on the login form]] from
 [[authentication really failed]].
-<<helper methods for nested login retry>>=
+
+We factor those two checks into small helpers because they are shared by
+the ordinary UG login path and the shared-session retry path.
+
+<<UG login retry helpers>>=
 def _has_login_form(self, response):
   """Return True if ``response`` still shows the KTH login form."""
   if not response.text:
@@ -177,11 +188,19 @@ def _has_login_form(self, response):
 
   doc_tree = html.fromstring(response.text)
   return len(doc_tree.xpath("//form[@id='loginForm']")) > 0
+@
 
+Replaying the original request is part of the semantics here, not a
+generic retry policy.
+If the login was triggered by an API call, we replay that exact request.
+Otherwise we revisit the configured trigger URL to resume the browser-style
+flow.
+
+<<UG login retry helpers>>=
 def _retry_after_login(self, session, args, kwargs):
   """Retry the original request or the trigger URL after login."""
   if args:
-    return session.request(*args, **kwargs)
+    return session.request(*args, **(kwargs or {}))
   if self.__login_trigger_url:
     return session.get(self.__login_trigger_url)
   return None
@@ -232,6 +251,33 @@ trigger_response = session.get(self.__login_trigger_url)
 final_response = self.login(session, trigger_response)
 @
 
+The [[base_url]] and [[login_trigger_url]] are deliberately independent:
+[[base_url]] scopes which responses the handler claims, while
+[[login_trigger_url]] is only used to bootstrap a redirect when the API
+returns a bare 401/403.
+This matters when the trigger page lives at a different path than the
+API, for example [[base_url]] could be [[https://app.kth.se/]] while
+[[login_trigger_url]] is [[https://app.kth.se/ug-gruppeditor/]].
+<<test functions>>=
+def test_base_url_scopes_independently_of_trigger():
+  """base_url controls scoping, login_trigger_url only triggers."""
+  handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/",
+    base_url="https://app.kth.se/")
+
+  broad_403 = requests.Response()
+  broad_403.status_code = requests.codes.forbidden
+  broad_403.url = "https://app.kth.se/api/other"
+  broad_403.history = []
+  assert handler.need_login(broad_403)
+
+  narrow_handler = UGlogin(
+    "user", "pass",
+    login_trigger_url="https://app.kth.se/ug-gruppeditor/")
+  assert not narrow_handler.need_login(broad_403)
+@
+
 Now, the remaining case, we must distinguish between three cases:
 \begin{enumerate}
 \item The UG login form is present---we fill it with credentials.
@@ -258,7 +304,7 @@ Let's start with the simple case: parsing the login page and posting the login
 form.
 This will contain the necessary redirects, so we just have to do it and then 
 the final response will redirect to the original page we were after.
-This means that we can simply return the
+This means that the submitted response is the one we usually continue from.
 <<handle UG login procedure>>=
 data = {}
 
@@ -308,164 +354,12 @@ else:
   final_response = login_response
 @
 
-If we land here, there is no [[loginForm]].
-We check whether a SAML relay form exists; if so, we forward it.
-Otherwise, if the response is 200~OK, we are already authenticated---the
-redirect through [[login.ug.kth.se]] completed automatically because the
-session already held valid cookies.
-If neither condition holds, authentication truly failed.
-<<handle SAML request or already authenticated>>=
-forms = doc_tree.xpath("//form")
-if len(forms) > 0:
-  <<forward the SAML relay form>>
-elif response.status_code == requests.codes.ok:
-  final_response = response
-else:
-  raise weblogin.AuthenticationError(
-    f"authentication failed (status {response.status_code}), "
-    f"no form found: {response.text}")
-@
+We can verify the shared-session case directly.
+After posting valid credentials, a transient return to the UG login form
+must not be treated as an immediate failure if replaying the original
+request succeeds.
 
-To forward the SAML relay form, we read all its variables and post the
-newly formed request.
-<<forward the SAML relay form>>=
-form = forms[0]
-
-data = {}
-for variable in form.xpath("//input"):
-  if variable.name:
-    data[variable.name] = variable.value or ""
-
-action_url = urllib.parse.urljoin(response.url, form.action)
-
-saml_response = session.request(form.method, action_url, data=data)
-
-if saml_response.status_code != requests.codes.ok:
-  raise weblogin.AuthenticationError(
-                      f"SAML error: not OK response: {saml_response.text}")
-
-final_response = saml_response
-@
-
-\subsection{Tests}
-
-It's hard to test the functionality.
-We basically want to test if the API on the other side still works.
-We can use the [[app.kth.se/ug-gruppeditor]] to test the two different 
-behaviours.
-Then we'll use [[kth.se/form/admin]] to test another.
-
-The first requests the UI, which redirects automatically.
-The second tests the API, which doesn't redirect the request, but we must do 
-the redirect ourselves using the [[login_trigger_url]].
-
-The two tests follow.
-Because these are live tests against the real KTH services, we keep a single
-session-scoped fixture and reuse it across the module.
-<<test [[kth.py]]>>=
-import os
-from unittest import mock
-
-import pytest
-import requests
-import weblogin
-import weblogin.microsoft
-from weblogin.kth import UGlogin
-
-pytestmark = [pytest.mark.live, pytest.mark.kth_live]
-
-def test_get_ui(kth_live_session):
-  response = kth_live_session.get(
-    "https://app.kth.se/ug-gruppeditor/"
-  )
-  assert response.status_code == requests.codes.ok and \
-    response.url.startswith("https://app.kth.se")
-
-def test_get_api(kth_live_session):
-  response = kth_live_session.get(
-    "https://app.kth.se/ug-gruppeditor/api/ug/groups"
-    "?editableBySelf=true"
-  )
-  assert response.status_code == requests.codes.ok and response.json()
-
-<<more test functions>>
-@
-
-Next, we'll do the same test using KTH Forms, since that gives forbidden 
-instead of unauthorized.
-<<more test functions>>=
-def test_get_form_admin(kth_form_live_session):
-  response = kth_form_live_session.get(
-    "https://www.kth.se/form/admin/api/webform/"
-    "65bbb936dcba25abb5f696da/answer/export"
-  )
-  assert response.status_code == requests.codes.ok and \
-    "application/" in response.headers["Content-Type"]
-@
-
-When a session has multiple [[UGlogin]] handlers (one per service), each
-handler must only trigger for its own service's URLs.
-Otherwise, the wrong handler catches a 401 from a different service,
-authenticates the wrong trigger URL, and the re-run still returns
-401---creating an infinite loop.
-This test verifies that a shared session with three handlers (UG editor,
-Forms, and participants) can authenticate to the participants API without
-looping.
-<<more test functions>>=
-PARTICIPANTS_URL = "https://app.kth.se/studentlistor/kurstillfallen"
-
-def test_shared_session_participants_api():
-  """Multiple UGlogin handlers don't loop on participants API."""
-  ug = UGlogin(
-    os.environ["KTH_LOGIN"],
-    os.environ["KTH_PASSWD"],
-    "https://app.kth.se/ug-gruppeditor/")
-  forms = UGlogin(
-    os.environ["KTH_LOGIN"],
-    os.environ["KTH_PASSWD"],
-    "https://www.kth.se/form/admin")
-  participants = UGlogin(
-    os.environ["KTH_LOGIN"],
-    os.environ["KTH_PASSWD"],
-    PARTICIPANTS_URL)
-  mfa = weblogin.microsoft.AzureMFA(
-    url="https://login.ug.kth.se",
-    notification_cmd="notify-send")
-
-  session = weblogin.AutologinSession([ug, forms, participants, mfa])
-
-  response = session.get(
-    f"{PARTICIPANTS_URL}"
-    f"/api/studentlistor/courseroundparticipants",
-    params={"courseCode": "DD1310", "term": "HT2023"})
-  assert response.status_code == requests.codes.ok
-  assert "participants" in response.json()
-@
-
-Now, we would also like to test authentication errors.
-<<more test functions>>=
-def test_auth_fail():
-  ug = weblogin.AutologinSession([
-      UGlogin("invalid user", "wrong password",
-              "https://app.kth.se/ug-gruppeditor/")
-    ])
-
-  try:
-    response = ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
-                      "?editableBySelf=true")
-  except weblogin.AuthenticationError:
-    assert True
-  else:
-    assert False
-@
-
-The live tests above show that KTH services still work end to end.
-We also want a focused regression test for the narrower failure mode that broke
-LADOK: after submitting credentials, a shared session can briefly land on the
-UG login page again before replaying the original request successfully.
-That sequence should count as success rather than as an immediate credential
-failure.
-<<more test functions>>=
+<<test functions>>=
 def test_shared_session_retry_after_nested_login_form():
   ug = UGlogin("dbosk", "secret", "https://app.kth.se/ug-gruppeditor/")
   session = weblogin.AutologinSession([ug])
@@ -520,6 +414,153 @@ def test_shared_session_retry_after_nested_login_form():
   assert second_call.kwargs == {"headers": {"Accept": "application/json"}}
 @
 
+If we land here, there is no [[loginForm]].
+We check whether a SAML relay form exists; if so, we forward it.
+Otherwise, if the response is 200~OK, we are already authenticated---the
+redirect through [[login.ug.kth.se]] completed automatically because the
+session already held valid cookies.
+If neither condition holds, authentication truly failed.
+<<handle SAML request or already authenticated>>=
+forms = doc_tree.xpath("//form")
+if len(forms) > 0:
+  <<forward the SAML relay form>>
+elif response.status_code == requests.codes.ok:
+  final_response = response
+else:
+  raise weblogin.AuthenticationError(
+    f"authentication failed (status {response.status_code}), "
+    f"no form found: {response.text}")
+@
+
+To forward the SAML relay form, we read all its variables and post the
+newly formed request.
+<<forward the SAML relay form>>=
+form = forms[0]
+
+data = {}
+for variable in form.xpath("//input"):
+  if variable.name:
+    data[variable.name] = variable.value or ""
+
+action_url = urllib.parse.urljoin(response.url, form.action)
+
+saml_response = session.request(form.method, action_url, data=data)
+
+if saml_response.status_code != requests.codes.ok:
+  raise weblogin.AuthenticationError(
+                      f"SAML error: not OK response: {saml_response.text}")
+
+final_response = saml_response
+@
+
+The remaining checks are live end-to-end tests against KTH.
+They verify that the complete handler still works against the real
+services.
+Because these tests talk to production systems, we reuse a shared
+session-scoped fixture from [[tests/conftest.py]].
+<<test [[kth.py]]>>=
+import os
+from unittest import mock
+
+import pytest
+import requests
+import weblogin
+import weblogin.microsoft
+from weblogin.kth import UGlogin
+
+pytestmark = [pytest.mark.live, pytest.mark.kth_live]
+
+<<test functions>>
+@
+
+The first live request exercises the UI path, where the browser-style
+request chain redirects automatically through the login service.
+
+<<test functions>>=
+def test_get_ui(kth_live_session):
+  response = kth_live_session.get(
+    "https://app.kth.se/ug-gruppeditor/"
+  )
+  assert response.status_code == requests.codes.ok and \
+    response.url.startswith("https://app.kth.se")
+
+def test_get_api(kth_live_session):
+  response = kth_live_session.get(
+    "https://app.kth.se/ug-gruppeditor/api/ug/groups"
+    "?editableBySelf=true"
+  )
+  assert response.status_code == requests.codes.ok and response.json()
+@
+
+Next, we'll do the same test using KTH Forms, since that gives forbidden 
+instead of unauthorized.
+<<test functions>>=
+def test_get_form_admin(kth_form_live_session):
+  response = kth_form_live_session.get(
+    "https://www.kth.se/form/admin/api/webform/"
+    "65bbb936dcba25abb5f696da/answer/export"
+  )
+  assert response.status_code == requests.codes.ok and \
+    "application/" in response.headers["Content-Type"]
+@
+
+When a session has multiple [[UGlogin]] handlers (one per service), each
+handler must only trigger for its own service's URLs.
+Otherwise, the wrong handler catches a 401 from a different service,
+authenticates via the wrong trigger URL, and the re-run still returns
+401---creating an infinite loop.
+This test verifies that a shared session with three handlers (UG editor,
+Forms, and participants) can authenticate to the participants API without
+looping.
+<<test functions>>=
+PARTICIPANTS_URL = "https://app.kth.se/studentlistor/kurstillfallen"
+
+def test_shared_session_participants_api():
+  """Multiple UGlogin handlers don't loop on participants API."""
+  ug = UGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    "https://app.kth.se/ug-gruppeditor/")
+  forms = UGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    "https://www.kth.se/form/admin")
+  participants = UGlogin(
+    os.environ["KTH_LOGIN"],
+    os.environ["KTH_PASSWD"],
+    PARTICIPANTS_URL)
+  mfa = weblogin.microsoft.AzureMFA(
+    url="https://login.ug.kth.se",
+    notification_cmd="notify-send")
+
+  session = weblogin.AutologinSession([ug, forms, participants, mfa])
+
+  response = session.get(
+    f"{PARTICIPANTS_URL}"
+    f"/api/studentlistor/courseroundparticipants",
+    params={"courseCode": "DD1310", "term": "HT2023"})
+  assert response.status_code == requests.codes.ok
+  assert "participants" in response.json()
+@
+
+The ordinary failure case should still raise [[AuthenticationError]].
+
+<<test functions>>=
+def test_auth_fail():
+  ug = weblogin.AutologinSession([
+      UGlogin("invalid user", "wrong password",
+              "https://app.kth.se/ug-gruppeditor/")
+    ])
+
+  try:
+    ug.get("https://app.kth.se/ug-gruppeditor/api/ug/groups"
+           "?editableBySelf=true")
+  except weblogin.AuthenticationError:
+    assert True
+  else:
+    assert False
+@
+
 
 \section{The SAML login handler for KTH}\label{SAMLhandler}
 
@@ -552,11 +593,11 @@ class SAMLlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to SAML server>>
 
-  def login(self, session, response, args=[], kwargs={}):
+  def login(self, session, response, args=None, kwargs=None):
     """
-    - Performs an action based on the response `response` from a request to 
+    - Performs an action based on the response `response` from a request to
       session `session`.
-    - `args` and `kwargs` are the options from the request triggering the login 
+    - `args` and `kwargs` are the options from the request triggering the login
       procedure, this is so that we can redo that request after logging in.
     - Raises an AuthenticationError exception on fails.
     """
@@ -567,7 +608,7 @@ class SAMLlogin(weblogin.AutologinHandler):
       self.__logging_in = False
 
     if self.__rerun_requests and args:
-      return session.request(*args, **kwargs)
+      return session.request(*args, **(kwargs or {}))
     return saml_response
 @
 
@@ -639,7 +680,7 @@ if saml_response.status_code != requests.codes.ok:
 
 The SAML handler uses the same re-entrancy guard as the other handlers, so it
 must clear that guard even when forwarding the SAML form raises an exception.
-<<more test functions>>=
+<<test functions>>=
 def test_SAMLlogin_resets_logging_in_after_exception(monkeypatch):
   handler = weblogin.kth.SAMLlogin()
   session = weblogin.AutologinSession([handler])

@@ -30,7 +30,7 @@ To determine if we need to log in, we use login handlers (\cref{LoginHandler}).
 import requests
 
 <<exceptions>>
-<<classes>>
+<<login handler base class>>
 
 class AutologinSession(requests.Session):
   """
@@ -129,40 +129,53 @@ return state
 
 \subsection{The [[AutologinHandler]] abstract class}\label{LoginHandler}
 
-A handler should derive from this class:
-<<classes>>=
+A handler should derive from this class.
+We introduce the class shell first and fill in the reusable behavior in
+separate sections below.
+<<login handler base class>>=
 class AutologinHandler:
   """
   An abstract class for a handler for the AutologinSession class.
   """
 
-  def __getstate__(self):
-    <<return handler state for pickling>>
+  <<login handler state methods>>
+  <<login handler abstract API>>
+  <<login handler identity methods>>
+@
 
-  def __setstate__(self, state):
-    <<restore handler state after unpickling>>
+The base class provides state-handling hooks for pickling, but the real
+contract for subclasses is the pair of abstract methods below: one method
+decides whether the current response needs handling, and the other performs
+the actual authentication step.
 
-  def login(self, session, response, args=None, kwargs=None):
-    """
-    Performs a login based on the response from a request.
-    - `session` is an instance of requests.Session, most likely an instance of 
-      AutologinSession.
-    - `response` is the response of the latest request.
-    - `args` and `kwargs` are the options from the latest request, this is so 
-      that we can redo that request after logging in.
+<<login handler state methods>>=
+def __getstate__(self):
+  <<return handler state for pickling>>
 
-    Raises an AuthenticationError exception if authentication fails.
-    """
-    raise NotImplementedError()
+def __setstate__(self, state):
+  <<restore handler state after unpickling>>
 
-  def need_login(self, response):
-    """
-    Checks a response to determine if logging in is needed,
-    returns True if needed.
-    """
-    raise NotImplementedError()
+<<login handler abstract API>>=
 
-  <<handler equality>>
+def login(self, session, response, args=None, kwargs=None):
+  """
+  Performs a login based on the response from a request.
+  - `session` is an instance of requests.Session, most likely an instance of 
+    AutologinSession.
+  - `response` is the response of the latest request.
+  - `args` and `kwargs` are the options from the latest request, this is so 
+    that we can redo that request after logging in.
+
+  Raises an AuthenticationError exception if authentication fails.
+  """
+  raise NotImplementedError()
+
+def need_login(self, response):
+  """
+  Checks a response to determine if logging in is needed,
+  returns True if needed.
+  """
+  raise NotImplementedError()
 @
 
 We test using minimal dummy handlers that extend [[AutologinHandler]],
@@ -214,37 +227,36 @@ part of a handler's identity.
 We use [[type()]] rather than [[isinstance()]] for the type check to
 prevent cross-class false positives---a [[UGlogin]] should never equal a
 [[SAMLlogin]], even if they happened to share attribute values.
-<<handler equality>>=
+<<login handler identity methods>>=
 def __eq__(self, other):
-    """Value-based equality on handler type and configuration."""
-    if type(self) != type(other):
-        return False
-    def _config(obj):
-        return {k: v for k, v in obj.__dict__.items()
-                if not k.endswith("__logging_in")}
-    return _config(self) == _config(other)
+  """Value-based equality on handler type and configuration."""
+  if type(self) != type(other):
+    return False
+  def _config(obj):
+    return {k: v for k, v in obj.__dict__.items()
+            if not k.endswith("__logging_in")}
+  return _config(self) == _config(other)
 
 def __hash__(self):
-    """Hash based on handler type and configuration."""
-    def _freeze(value):
-        if isinstance(value, dict):
-            return frozenset(
-                (k, _freeze(v)) for k, v in value.items()
-            )
-        if isinstance(value, list):
-            return tuple(_freeze(v) for v in value)
-        return value
+  """Hash based on handler type and configuration."""
+  def _freeze(value):
+    if isinstance(value, dict):
+      return frozenset(
+        (k, _freeze(v)) for k, v in value.items()
+      )
+    if isinstance(value, list):
+      return tuple(_freeze(v) for v in value)
+    return value
 
-    items = {k: v for k, v in self.__dict__.items()
-             if not k.endswith("__logging_in")}
-    return hash(
-        (type(self),
-         frozenset(
-             (k, _freeze(v)) for k, v in items.items()
-         ))
-    )
+  items = {k: v for k, v in self.__dict__.items()
+           if not k.endswith("__logging_in")}
+  return hash(
+    (type(self),
+     frozenset(
+       (k, _freeze(v)) for k, v in items.items()
+     ))
+  )
 
-<<handler serialization>>
 @
 
 The [[_freeze]] helper converts mutable values---such as the [[vars]]
@@ -300,14 +312,14 @@ We therefore sanitize pickled handler state by forcing every attribute
 ending in [[__logging_in]] back to [[False]] both when serializing and
 when restoring.
 
-<<handler serialization>>=
+<<login handler state methods>>=
 def _reset_transient_state(self, state):
-    """Return ``state`` with transient login flags reset."""
-    sanitized = state.copy()
-    for key in sanitized:
-        if key.endswith("__logging_in"):
-            sanitized[key] = False
-    return sanitized
+  """Return ``state`` with transient login flags reset."""
+  sanitized = state.copy()
+  for key in sanitized:
+    if key.endswith("__logging_in"):
+      sanitized[key] = False
+  return sanitized
 @
 
 <<return handler state for pickling>>=
