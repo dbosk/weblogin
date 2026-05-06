@@ -979,14 +979,22 @@ concatenation) so that any pre-existing query parameters with shell or
 URL metacharacters survive intact, and so a request that already
 carries an empty [[domain_hint=]] is replaced rather than duplicated.
 
-After the GET we do not interpret the result.
+After the GET we still do not interpret the result.
 The expected outcome is a [[302]] (followed automatically by
 [[requests]]) to the federated IdP, where [[SAMLlogin]] and
 [[UGlogin]] take over via the [[AutologinSession]] handler loop on
 each intermediate response.
-If the original caller passed [[args]] and the failing request had a
-redirect history, we replay it---mirroring [[UGlogin]]'s convention
-for the same situation.
+
+Crucially, we return that resulting response directly rather than
+replaying [[args]].
+In the SharePoint flow, [[MicrosoftLogin]] runs inside the handler loop
+for the bootstrap request that [[UGlogin]] used to reach Azure AD, so
+[[args]] still refer to that bootstrap [[/_forms/default.aspx]] request.
+Replaying it here would restart the SharePoint trigger before
+[[UGlogin]] could inspect the federated login page, creating an
+infinite loop.
+Returning the federated response preserves the nesting: the outer
+handler receives the ADFS page and can continue the login.
 <<MicrosoftLogin login>>=
 def login(self, session, response, args=None, kwargs=None):
   """
@@ -1022,8 +1030,6 @@ def login(self, session, response, args=None, kwargs=None):
   finally:
     self.__logging_in = False
 
-  if args and response.history:
-    return session.request(*args, **(kwargs or {}))
   return final_response
 @
 
@@ -1186,19 +1192,42 @@ def test_microsoftlogin_replaces_existing_domain_hint():
   assert query["domain_hint"] == ["ug.kth.se"]
 @
 
-If the original request had a redirect history, the handler replays
-it after the federation hop, mirroring [[UGlogin]]'s convention.
+The critical regression is the nested-handler case described above.
+When the authorize page came from a bootstrap request with redirect
+history, [[MicrosoftLogin]] must return the federated response to its
+caller instead of replaying that bootstrap request.
+Otherwise the caller---typically [[UGlogin]] in a SharePoint flow---
+never sees the ADFS page and the whole round-trip restarts.
 
 <<test functions>>=
-def test_microsoftlogin_replays_original_request():
+def test_microsoftlogin_returns_federated_response_without_replay():
   handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
-  session = FakeSession()
+  federated = MockResponse(
+    "",
+    url="https://login.ug.kth.se/adfs/ls/?wa=wsignin1.0",
+  )
+  session = FakeSession(response=federated)
   response = MockResponse("", url=AUTHORIZE_URL)
-  response.history = [MockResponse("", url=AUTHORIZE_URL)]
-  args = ("GET", "https://example/_api/file")
+  response.history = [
+    MockResponse(
+      "",
+      url="https://kth-my.sharepoint.com/_forms/default.aspx",
+    )
+  ]
+  args = (
+    "GET",
+    "https://kth-my.sharepoint.com/_forms/default.aspx",
+  )
   kwargs = {"allow_redirects": True}
-  handler.login(session, response, args=args, kwargs=kwargs)
-  assert session.requests == [(args, kwargs)]
+  returned = handler.login(
+    session,
+    response,
+    args=args,
+    kwargs=kwargs,
+  )
+
+  assert returned is federated
+  assert session.requests == []
 @
 
 Finally, omitting [[domain_hint]] entirely is a programming error and
