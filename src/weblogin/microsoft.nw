@@ -11,6 +11,11 @@ This module provides a handler that detects the MFA challenge,
 notifies the user of the number, and polls the server by
 resubmitting the page's form until the user approves the request.
 
+The same shared session can also carry ordinary API responses.
+Those may be XML or JSON error payloads rather than login pages,
+so the MFA handler must ignore them instead of trying to parse
+every text body as candidate HTML.
+
 Because the MFA page is part of Microsoft's authentication
 pipeline---not tied to any particular institution---this handler
 works universally.
@@ -58,6 +63,7 @@ session = weblogin.AutologinSession([
 
 The module structure:
 <<[[microsoft.py]]>>=
+import logging
 import os
 import shlex
 import subprocess
@@ -65,9 +71,11 @@ import time
 
 import requests
 import urllib.parse
-from lxml import html
+from lxml import etree, html
 
 import weblogin
+
+logger = logging.getLogger(__name__)
 
 <<Azure MFA handler>>
 @
@@ -82,7 +90,7 @@ class AzureMFA(weblogin.AutologinHandler):
   challenge.
 
   Detects the challenge by looking for a ``<p>`` element with
-  ``id="validEntropyNumber"`` in the response HTML. When
+  ``id="validEntropyNumber"`` in an HTML-like response. When
   detected, notifies the user of the number and polls by
   resubmitting the page's form until the challenge is resolved.
 
@@ -114,6 +122,8 @@ class AzureMFA(weblogin.AutologinHandler):
     self.__poll_interval = poll_interval
     self.__logging_in = False
 
+  <<robust markup parsing helper>>
+
   def need_login(self, response):
     """
     Returns True if the response contains a Microsoft MFA
@@ -135,6 +145,10 @@ class AzureMFA(weblogin.AutologinHandler):
     self.__logging_in = True
 
     try:
+      logger.debug(
+        "AzureMFA starting for %s",
+        weblogin._sanitize_url(response.url),
+      )
       <<extract MFA number>>
       <<notify user of MFA number>>
       <<wait for MFA approval>>
@@ -147,17 +161,31 @@ We use the same [[self.__logging_in]] guard as the other handlers
 to prevent re-entrant invocations while we are polling.
 That guard must also be exception-safe: if notification or polling raises, we
 still need later MFA challenges to be detectable.
+The pages in this flow carry both hidden form fields and the MFA number itself,
+so the debug logging must not expose either one.
 
 The tests use mock responses because a live integration test would
 require real MFA interaction.
 
 <<test [[microsoft.py]]>>=
+import logging
 import weblogin
 import weblogin.microsoft as microsoft
 from weblogin.microsoft import AzureMFA
 
 MFA_HTML = """
 <html><body>
+<form method="POST" action="/common/SAS/ProcessAuth">
+  <input name="AzureMfaAuthentication" value="token123" />
+  <input name="Context" value="ctx456" />
+  <p id="validEntropyNumber">42</p>
+</form>
+</body></html>
+"""
+
+XHTML_MFA = """
+<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
 <form method="POST" action="/common/SAS/ProcessAuth">
   <input name="AzureMfaAuthentication" value="token123" />
   <input name="Context" value="ctx456" />
@@ -181,13 +209,32 @@ RESOLVED_HTML = """
 </body></html>
 """
 
+XML_ERROR = """
+<?xml version="1.0" encoding="utf-8"?>
+<m:error xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+  <m:message xml:lang="en-US">Access denied</m:message>
+</m:error>
+"""
+
+JSON_ERROR = """
+{"error": {"code": "access_denied", "message": "No access"}}
+"""
+
 class MockResponse:
   def __init__(self, text,
                url="https://login.ug.kth.se/auth",
-               status_code=200):
+               status_code=200,
+               headers=None):
     self.text = text
+    self.content = text.encode("utf-8")
     self.url = url
     self.status_code = status_code
+    if headers is None:
+      self.headers = {
+        "Content-Type": "text/html; charset=utf-8"
+      }
+    else:
+      self.headers = headers
     self.history = []
 
 def stub_successful_mfa_poll(monkeypatch):
@@ -206,6 +253,62 @@ def stub_successful_mfa_poll(monkeypatch):
 @
 
 
+\subsection{Robust markup parsing}\label{AzureMFAParseMarkup}
+
+Three places in the handler need to turn an HTTP response into a
+parsed [[lxml]] tree: the detection check in [[need_login()]], the
+number extraction in [[login()]], and the form extraction during
+polling.
+A naive [[html.fromstring(response.text)]] in those spots breaks
+in two distinct ways.
+
+First, a shared authenticated session may carry ordinary API
+responses---SharePoint REST, for example, returns XML error bodies
+on a [[403]].
+Parsing every text body as HTML would therefore be handler
+overreach: such bodies are not MFA pages, and the correct answer
+is simply \enquote{not for us}.
+
+Second, real MFA pages can arrive as XHTML beginning with an XML
+declaration that names an encoding.
+[[lxml.html.fromstring()]] rejects such declarations when given a
+Unicode string, because the declared encoding and the string's own
+encoding might disagree; bytes side-step the conflict by letting
+the parser honour the declaration directly.
+
+The helper below addresses both problems in one place.
+It treats an explicit non-HTML [[Content-Type]] as an immediate
+negative when [[require_html]] is set, but is lenient when the
+header is missing or empty---some authentication endpoints are
+sloppy about metadata, and we do not want to miss a real MFA page
+on that basis alone.
+Bodies we do inspect are read as bytes via [[response.content]],
+falling back to [[response.text]] only when [[content]] is absent
+(useful for hand-rolled mocks).
+A parser failure returns [[None]] rather than propagating; the
+callers each decide what \enquote{unparseable} means in their
+context.
+<<robust markup parsing helper>>=
+def _parse_markup(self, response, require_html=False):
+  headers = getattr(response, "headers", {}) or {}
+  content_type = headers.get("Content-Type", "")
+  if require_html and content_type \
+      and "html" not in content_type.casefold():
+    return None
+
+  body = getattr(response, "content", None)
+  if not body:
+    body = response.text
+  if not body:
+    return None
+
+  try:
+    return html.fromstring(body)
+  except (etree.ParserError, TypeError, ValueError):
+    return None
+@
+
+
 \subsection{Detecting the MFA challenge}\label{AzureMFAURLScope}
 
 The handler first checks whether the response falls within the
@@ -218,19 +321,31 @@ Scoping to the known authentication endpoint avoids the problem.
 
 If no URL was configured, the handler checks every response---use
 this only when the MFA endpoint is not known ahead of time.
+
+Once the URL passes, we delegate to [[_parse_markup]]
+(\cref{AzureMFAParseMarkup}) with [[require_html=True]] so that
+non-HTML responses are dismissed without a parse attempt.
+A [[None]] result means \enquote{not an MFA page}, so the
+detection returns [[False]] in that case.
 <<check if MFA challenge is present>>=
 if self.__url is not None \
     and not response.url.startswith(self.__url):
   return False
 
-if not response.text:
+doc_tree = self._parse_markup(response, require_html=True)
+if doc_tree is None:
   return False
 
-doc_tree = html.fromstring(response.text)
 elements = doc_tree.xpath(
   f"//p[@id='{self.MFA_ELEMENT_ID}']"
 )
-return len(elements) > 0
+has_challenge = len(elements) > 0
+if has_challenge:
+  logger.debug(
+    "AzureMFA detected challenge at %s",
+    weblogin._sanitize_url(response.url),
+  )
+return has_challenge
 @
 
 We can verify the detection logic with small mock pages.
@@ -287,18 +402,128 @@ def test_mfa_not_detected_empty_response():
   assert not handler.need_login(response)
 @
 
+An XML API error is not an MFA page and must be ignored without
+raising.
+
+<<test functions>>=
+def test_mfa_not_detected_xml_error_response():
+  handler = AzureMFA()
+  response = MockResponse(
+    XML_ERROR,
+    headers={"Content-Type": "application/xml; charset=utf-8"}
+  )
+  assert not handler.need_login(response)
+@
+
+Likewise, JSON error bodies must not be treated as candidate MFA
+pages.
+
+<<test functions>>=
+def test_mfa_not_detected_json_error_response():
+  handler = AzureMFA()
+  response = MockResponse(
+    JSON_ERROR,
+    headers={"Content-Type": "application/json"}
+  )
+  assert not handler.need_login(response)
+@
+
+Real MFA pages may still arrive as XHTML with an XML declaration.
+Using [[response.content]] keeps those pages parseable.
+
+<<test functions>>=
+def test_mfa_detected_xhtml_response_with_xml_declaration():
+  handler = AzureMFA()
+  response = MockResponse(
+    XHTML_MFA,
+    headers={
+      "Content-Type": "application/xhtml+xml; charset=utf-8"
+    }
+  )
+  assert handler.need_login(response)
+@
+
+The debug logs must not leak the MFA token or the number itself.
+
+<<test functions>>=
+def test_mfa_logging_redacts_query_and_number(caplog):
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://login.ug.kth.se/auth?ctx=secret"
+  )
+
+  with caplog.at_level(logging.DEBUG, logger="weblogin.microsoft"):
+    assert handler.need_login(response)
+
+  assert "ctx=secret" not in caplog.text
+  assert "42" not in caplog.text
+  assert "https://login.ug.kth.se/auth?..." in caplog.text
+@
+
 
 \subsection{Extracting the MFA number}
 
 Once we know the MFA challenge is present, we extract the number
 from the element's text content.
+We reuse [[_parse_markup]] (\cref{AzureMFAParseMarkup}) so the
+same XHTML-and-encoding handling applies here, but at this point a
+parse failure is no longer a harmless \enquote{not for us}
+answer: the response already passed the detection check, so it
+claimed to be an MFA page but no longer has the expected shape.
+We therefore raise a clear authentication error instead of leaking
+parser internals.
 <<extract MFA number>>=
-doc_tree = html.fromstring(response.text)
-element = doc_tree.xpath(
-  f"//p[@id='{self.MFA_ELEMENT_ID}']"
-)[0]
+doc_tree = self._parse_markup(response)
+if doc_tree is None:
+  raise weblogin.AuthenticationError(
+    "MFA page could not be parsed"
+  )
+
+try:
+  element = doc_tree.xpath(
+    f"//p[@id='{self.MFA_ELEMENT_ID}']"
+  )[0]
+except IndexError:
+  raise weblogin.AuthenticationError(
+    "MFA page has no number to display"
+  )
+
 number = element.text_content().strip()
 mfa_message = f"MFA: {number}"
+@
+
+The byte-first parsing must also work in the full login path,
+not only in [[need_login()]].
+A real MFA page can arrive as XHTML with an XML declaration, and
+[[login()]] must extract the number from such a page just as it
+would from a plain HTML one.
+
+<<test functions>>=
+def test_login_handles_xhtml_mfa_page(monkeypatch):
+  calls = []
+  monkeypatch.delenv(
+    "WEBLOGIN_MFA_NOTIFICATION", raising=False
+  )
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append((cmd, check))
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  handler = AzureMFA(notification_cmd="xmessage")
+  handler.login(
+    object(),
+    MockResponse(
+      XHTML_MFA,
+      headers={
+        "Content-Type": "application/xhtml+xml; charset=utf-8"
+      }
+    )
+  )
+
+  assert calls == [(["xmessage", "MFA: 42"], False)]
 @
 
 
@@ -340,13 +565,16 @@ if notification_cmd is None:
   notification_cmd = self.__notification_cmd
 
 if notification_cmd:
+  logger.debug("AzureMFA using notification command")
   subprocess.run(
     shlex.split(notification_cmd) + [mfa_message]
   )
 else:
   try:
+    logger.debug("AzureMFA using figlet notification fallback")
     subprocess.run(["figlet", mfa_message], check=True)
   except FileNotFoundError:
+    logger.debug("AzureMFA using plain stdout notification fallback")
     print(mfa_message)
 @
 
@@ -489,7 +717,12 @@ To extract the form data, we parse the page and collect all
 [[<input>]] elements, the same approach used by the other
 handlers in this package.
 <<extract form from current response>>=
-doc_tree = html.fromstring(current_response.text)
+doc_tree = self._parse_markup(current_response)
+if doc_tree is None:
+  raise weblogin.AuthenticationError(
+    "MFA page could not be parsed"
+  )
+
 try:
   form = doc_tree.xpath("//form")[0]
 except IndexError:
@@ -510,6 +743,10 @@ action_url = urllib.parse.urljoin(
 As explained above, we call the parent class method directly to
 bypass the handler loop.
 <<post form, bypassing handler loop>>=
+logger.debug(
+  "AzureMFA polling %s",
+  weblogin._sanitize_url(action_url),
+)
 current_response = requests.Session.request(
   session, form.method, action_url, data=data
 )
@@ -517,15 +754,22 @@ current_response = requests.Session.request(
 
 We check whether the MFA challenge has been resolved by looking
 for the disappearance of the [[validEntropyNumber]] element.
+An empty body or otherwise unparseable response also ends the
+loop: [[_parse_markup]] already covers both cases by returning
+[[None]], so we use that as the single termination signal here.
 <<check if MFA challenge is resolved>>=
-if not current_response.text:
+resolved_tree = self._parse_markup(current_response)
+if resolved_tree is None:
   break
 
-resolved_tree = html.fromstring(current_response.text)
 elements = resolved_tree.xpath(
   f"//p[@id='{self.MFA_ELEMENT_ID}']"
 )
 if len(elements) == 0:
+  logger.debug(
+    "AzureMFA challenge resolved at %s",
+    weblogin._sanitize_url(current_response.url),
+  )
   break
 @
 

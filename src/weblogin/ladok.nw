@@ -23,12 +23,16 @@ We need a class for LADOK that detects logins to LADOK.
 Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
 class.
 <<[[ladok.py]]>>=
+import logging
+
 from lxml import html
 from pprint import pprint
 import requests
 import weblogin
 import weblogin.seamlessaccess as sa
 import urllib.parse
+
+logger = logging.getLogger(__name__)
 
 class SSOlogin(weblogin.AutologinHandler):
   """
@@ -88,6 +92,8 @@ Hence, we block any new login procedures from starting by setting
 That guard is temporary runtime state only. If any LADOK login step raises, we
 must still clear it before returning control to the caller; otherwise later
 redirects would be ignored as if the old login were still in progress.
+The redirect chain also embeds request state in URLs, so the debug logging here
+must stay at the event level and use sanitized URLs only.
 
 We can verify that exception safety directly.
 
@@ -281,8 +287,17 @@ login.
 <<check if we're redirected to login server>>=
 if response.status_code == requests.codes.unauthorized \
      and "ladok.se" in response.url:
+  logger.debug(
+    "SSOlogin detected %s for %s",
+    response.status_code,
+    weblogin._sanitize_url(response.url),
+  )
   return True
 elif response.url.startswith(self.__login_url):
+  logger.debug(
+    "SSOlogin detected login redirect %s",
+    weblogin._sanitize_url(response.url),
+  )
   return True
 
 return False
@@ -325,6 +340,10 @@ response = make_test_environment_ladok_request(ls)
 
 If we need to log in we have a few steps to do:
 <<log in to login server>>=
+logger.debug(
+  "SSOlogin starting for institution %s",
+  self.__institution,
+)
 <<start ladok login>>
 <<fetch return URL from LADOK's SeamlessAccess request>>
 <<fetch institution SAML URL from SeamlessAccess>>
@@ -346,6 +365,10 @@ the following URL\footnote{%
   instead.
 } and it will trigger the steps needed.
 <<start ladok login>>=
+logger.debug(
+  "SSOlogin starting LADOK redirect via %s",
+  weblogin._sanitize_url(self.__base_url),
+)
 response = session.get(f"{self.__base_url}/Shibboleth.sso/Logout"
                        f"?return={self.__base_url}/gui/auth/swamid/login")
 @
@@ -363,6 +386,10 @@ if "seamlessaccess.org" not in parsed_url.netloc:
 
 return_url = urllib.parse.unquote(
                         urllib.parse.parse_qs(parsed_url.query)["return"][0])
+logger.debug(
+  "SSOlogin reached SeamlessAccess redirect %s",
+  weblogin._sanitize_url(response.url),
+)
 @
 
 Now we actually fetch the SAML server URL, which is called by [[entityID]].
@@ -377,6 +404,10 @@ try:
     sa_data = sa_data[0]
 
   entityID = sa_data["entityID"]
+  logger.debug(
+    "SSOlogin resolved institution %s to entityID",
+    self.__institution,
+  )
 except IndexError:
   raise ValueError(f"{self.__institution} didn't give any match.")
 except KeyError:
@@ -393,6 +424,10 @@ if "?" in return_url:
 else:
   return_url += f"?entityID={entityID}"
 
+logger.debug(
+  "SSOlogin handing off to institution at %s",
+  weblogin._sanitize_url(return_url),
+)
 ladok_response = session.get(return_url)
 @
 
@@ -607,6 +642,10 @@ doc_tree = html.fromstring(ladok_response.text)
 try:
   form = doc_tree.xpath("//form")[0]
 except IndexError:
+  logger.debug(
+    "SSOlogin found no form in %s",
+    weblogin._sanitize_url(ladok_response.url),
+  )
   raise weblogin.AuthenticationError(f"Got page without any form and "
                                      f"not on LADOK: {ladok_response}")
 @
@@ -707,6 +746,10 @@ variables to set.
 <<store data to detect infinite loops>>
 
 action_url = urllib.parse.urljoin(ladok_response.url, form.action)
+logger.debug(
+  "SSOlogin submitting form to %s",
+  weblogin._sanitize_url(action_url),
+)
 ladok_response = session.request(form.method, action_url, data=data)
 
 <<if we're in a loop>>:

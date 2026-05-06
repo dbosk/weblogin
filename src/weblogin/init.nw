@@ -27,8 +27,14 @@ To determine if we need to log in, we use login handlers (\cref{LoginHandler}).
 \end{figure}
 
 <<[[init.py]]>>=
+import logging
+import urllib.parse
+
 import requests
 
+logger = logging.getLogger(__name__)
+
+<<logging helpers>>
 <<exceptions>>
 <<login handler base class>>
 
@@ -53,10 +59,24 @@ class AutologinSession(requests.Session):
     """
     Wrapper around requests.Session.request(...) to check we must log in.
     """
+    method = args[0] if args else kwargs.get("method")
+    url = args[1] if len(args) > 1 else kwargs.get("url")
     response = super().request(*args, **kwargs)
+    logger.debug(
+      "HTTP %s %s -> %s %s",
+      method,
+      _sanitize_url(url),
+      response.status_code,
+      _sanitize_url(response.url),
+    )
     
     <<log in if necessary>>
 
+    logger.debug(
+      "AutologinSession returning %s %s",
+      response.status_code,
+      _sanitize_url(response.url),
+    )
     return response
 
   def add_handler(self, handler):
@@ -109,6 +129,62 @@ def test_add_handler_allows_different_handlers():
     session.add_handler(DummyHandler("x"))
     session.add_handler(OtherHandler("x"))
     assert len(session._AutologinSession__handlers) == 2
+@
+
+\subsection{Debug logging}
+
+Authentication problems often hide inside redirect chains, so sparse debug
+logging is useful when a live service changes behavior.
+Those same redirects also carry one-time tokens in query strings, so we log
+only sanitized URLs with the query and fragment removed.
+
+<<logging helpers>>=
+def _sanitize_url(url):
+  """Return ``url`` with query string and fragment redacted."""
+  if not url:
+    return url
+
+  parsed = urllib.parse.urlsplit(url)
+  sanitized = urllib.parse.urlunsplit(
+    (parsed.scheme, parsed.netloc, parsed.path, "", "")
+  )
+  if parsed.query:
+    sanitized += "?..."
+  if parsed.fragment:
+    sanitized += "#..."
+  return sanitized
+@
+
+Let's verify both the sanitizing helper and the session-level debug log.
+
+<<test functions>>=
+def test_sanitize_url_redacts_query_and_fragment():
+    assert weblogin._sanitize_url(
+        "https://example.com/path?token=secret#state"
+    ) == "https://example.com/path?...#..."
+
+def test_request_logging_redacts_urls(monkeypatch, caplog):
+    session = AutologinSession([])
+    response = requests.Response()
+    response.status_code = requests.codes.ok
+    response.url = "https://example.com/final?ticket=secret"
+    response._content = b"ok"
+    response.history = []
+
+    def fake_request(self, method, url, **kwargs):
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+
+    with caplog.at_level(logging.DEBUG, logger="weblogin"):
+        session.request(
+            "GET", "https://example.com/start?token=secret"
+        )
+
+    assert "token=secret" not in caplog.text
+    assert "ticket=secret" not in caplog.text
+    assert "https://example.com/start?..." in caplog.text
+    assert "https://example.com/final?..." in caplog.text
 @
 
 \subsection{Pickling an [[AutologinSession]] object}
@@ -182,7 +258,10 @@ We test using minimal dummy handlers that extend [[AutologinHandler]],
 avoiding any dependency on live authentication services.
 
 <<test [[init.py]]>>=
+import logging
 import pickle  # noqa: S403 -- used only in tests for handler state
+import requests
+import weblogin
 from weblogin import AutologinHandler, AutologinSession
 
 class DummyHandler(AutologinHandler):
@@ -359,7 +438,19 @@ Each handler will possibly update the response for the next handler.
 <<log in if necessary>>=
 for handler in self.__handlers:
   if handler.need_login(response):
+    logger.debug(
+      "Handler %s claimed %s %s",
+      type(handler).__name__,
+      response.status_code,
+      _sanitize_url(response.url),
+    )
     response = handler.login(self, response, args, kwargs)
+    logger.debug(
+      "Handler %s returned %s %s",
+      type(handler).__name__,
+      response.status_code,
+      _sanitize_url(response.url),
+    )
 @
 
 The benefit of this design comes when trying to log in using an SSO:
