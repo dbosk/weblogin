@@ -12,11 +12,15 @@ There are two login handlers needed for KTH.
 
 The module looks like this.
 <<[[kth.py]]>>=
+import logging
+
 from lxml import html
 import requests
 import urllib.parse
 import weblogin
 import weblogin.seamlessaccess as sa
+
+logger = logging.getLogger(__name__)
 
 <<UG login handler>>
 <<SAML login handler>>
@@ -99,6 +103,9 @@ We note that while we're logging in, we don't want those requests interrupted
 by another login session.
 Hence, we block any new login procedures from starting by setting
 [[self.__logging_in]].
+For live debugging we log only the main branch points in the flow and always
+ sanitize URLs first, because the redirect chain carries one-time request
+ parameters that must not leak into logs.
 
 \subsection{Check if we need to log in at KTH}
 
@@ -130,8 +137,17 @@ UNAUTH_STATUS_CODES = [
 if response.status_code in self.UNAUTH_STATUS_CODES and \
      <<URL belongs to this handler's service>>:
   self.__rerun_requests = True
+  logger.debug(
+    "UGlogin detected %s for %s",
+    response.status_code,
+    weblogin._sanitize_url(response.url),
+  )
   return True
 elif <<should catch login-page redirect>>:
+  logger.debug(
+    "UGlogin detected login redirect %s",
+    weblogin._sanitize_url(response.url),
+  )
   return True
 
 return False
@@ -231,6 +247,10 @@ the original request would succeed.
 We therefore keep the whole login procedure inside a single [[try]] block and
 delay failure decisions until we have enough evidence.
 <<log in to login server, produce new response>>=
+logger.debug(
+  "UGlogin starting for %s",
+  weblogin._sanitize_url(response.url),
+)
 try:
   if response.status_code in self.UNAUTH_STATUS_CODES:
     <<trigger redirect to login page>>
@@ -247,6 +267,10 @@ can log in using the method above.
 When we've done that, we must re-run the original request (the one that didn't 
 trigger a redirect) and return the reply from the new request.
 <<trigger redirect to login page>>=
+logger.debug(
+  "UGlogin bootstrapping redirect via %s",
+  weblogin._sanitize_url(self.__login_trigger_url),
+)
 trigger_response = session.get(self.__login_trigger_url)
 final_response = self.login(session, trigger_response)
 @
@@ -338,8 +362,17 @@ data["UserName"] = self.__username if "@ug.kth.se" in self.__username \
 data["Password"] = self.__password
 data["Kmsi"] = True
 
+action_url = urllib.parse.urljoin(
+  f"{self.LOGIN_URL}/", login_form.action
+)
+
+logger.debug(
+  "UGlogin submitting password form to %s",
+  weblogin._sanitize_url(action_url),
+)
+
 login_response = session.request(
-  login_form.method, f"{self.LOGIN_URL}/{login_form.action}",
+  login_form.method, action_url,
   data=data)
 
 if login_response.status_code != requests.codes.ok:
@@ -364,14 +397,32 @@ Once we have already replayed that request here, the outer [[login]] method
 must not replay it a second time.
 <<check whether login page really means failure>>=
 if self._has_login_form(login_response):
+  logger.debug(
+    "UGlogin reached login form again at %s; retrying flow",
+    weblogin._sanitize_url(login_response.url),
+  )
   retry_response = self._retry_after_login(session, args, kwargs)
   if retry_response is None or self._has_login_form(retry_response):
+    logger.debug(
+      "UGlogin retry still ended at login form %s",
+      weblogin._sanitize_url(
+        retry_response.url if retry_response else login_response.url
+      ),
+    )
     raise weblogin.AuthenticationError(
       f"authentication as {self.__username} failed (redirect to same page), "
       f"probably wrong username or password.")
+  logger.debug(
+    "UGlogin resumed authenticated flow at %s",
+    weblogin._sanitize_url(retry_response.url),
+  )
   final_response = retry_response
   request_already_rerun = bool(args)
 else:
+  logger.debug(
+    "UGlogin completed at %s",
+    weblogin._sanitize_url(login_response.url),
+  )
   final_response = login_response
 @
 
@@ -444,10 +495,23 @@ If neither condition holds, authentication truly failed.
 <<handle SAML request or already authenticated>>=
 forms = doc_tree.xpath("//form")
 if len(forms) > 0:
+  logger.debug(
+    "UGlogin forwarding relay form from %s",
+    weblogin._sanitize_url(response.url),
+  )
   <<forward the SAML relay form>>
 elif response.status_code == requests.codes.ok:
+  logger.debug(
+    "UGlogin reused existing authentication at %s",
+    weblogin._sanitize_url(response.url),
+  )
   final_response = response
 else:
+  logger.debug(
+    "UGlogin failed at %s with status %s and no form",
+    weblogin._sanitize_url(response.url),
+    response.status_code,
+  )
   raise weblogin.AuthenticationError(
     f"authentication failed (status {response.status_code}), "
     f"no form found: {response.text}")
@@ -465,6 +529,11 @@ for variable in form.xpath("//input"):
 
 action_url = urllib.parse.urljoin(response.url, form.action)
 
+logger.debug(
+  "UGlogin forwarding SAML relay to %s",
+  weblogin._sanitize_url(action_url),
+)
+
 saml_response = session.request(form.method, action_url, data=data)
 
 if saml_response.status_code != requests.codes.ok:
@@ -480,6 +549,7 @@ services.
 Because these tests talk to production systems, we reuse a shared
 session-scoped fixture from [[tests/conftest.py]].
 <<test [[kth.py]]>>=
+import logging
 import os
 from unittest import mock
 
@@ -582,6 +652,27 @@ def test_auth_fail():
     assert False
 @
 
+We can verify that the SAML handler emits only sanitized URLs in debug logs.
+
+<<test functions>>=
+def test_SAMLlogin_logging_redacts_query(caplog):
+  handler = weblogin.kth.SAMLlogin()
+  response = requests.Response()
+  response.status_code = requests.codes.ok
+  response.url = (
+    "https://saml-5.sys.kth.se/idp/profile/SAML2/Redirect/SSO"
+    "?SAMLRequest=secret"
+  )
+  response.history = []
+
+  with caplog.at_level(logging.DEBUG, logger="weblogin.kth"):
+    assert handler.need_login(response)
+
+  assert "SAMLRequest=secret" not in caplog.text
+  assert "https://saml-5.sys.kth.se/idp/profile/SAML2/Redirect/SSO?..." \
+      in caplog.text
+@
+
 
 \section{The SAML login handler for KTH}\label{SAMLhandler}
 
@@ -642,7 +733,13 @@ The SAML URL gotten from SeamlessAccess.org is\footnote{%
 So we will simply check if the domain contains both [[saml]] and 
 [[sys.kth.se]].
 <<check if we're redirected to SAML server>>=
-return "saml" in response.url and "sys.kth.se" in response.url
+needs_login = "saml" in response.url and "sys.kth.se" in response.url
+if needs_login:
+  logger.debug(
+    "SAMLlogin detected SAML response %s",
+    weblogin._sanitize_url(response.url),
+  )
+return needs_login
 @
 
 \subsection{Run KTH's SAML procedure}
@@ -657,6 +754,10 @@ All in all, we want to produce a new response from the server,
 We start by extracting any form.
 If there is no form, we simply proceed without doing anything.
 <<run SAML procedure, produce new response>>=
+logger.debug(
+  "SAMLlogin starting for %s",
+  weblogin._sanitize_url(response.url),
+)
 doc_tree = html.fromstring(response.text)
 try:
   form = doc_tree.xpath("//form")[0]
@@ -669,6 +770,10 @@ else:
 
 Now, it's easy to ignore this request.
 <<don't handle this request>>=
+logger.debug(
+  "SAMLlogin found no form in %s",
+  weblogin._sanitize_url(response.url),
+)
 pass
 @
 
@@ -692,6 +797,10 @@ However, we can't pretend that we are done and set
 proceed.)
 But we can recursively call this handler again and again until done.
 <<post form action>>=
+logger.debug(
+  "SAMLlogin forwarding form to %s",
+  weblogin._sanitize_url(action_url),
+)
 saml_response = session.request(form.method, action_url, data=data)
 
 if saml_response.status_code != requests.codes.ok:

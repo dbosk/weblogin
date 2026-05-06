@@ -63,6 +63,7 @@ session = weblogin.AutologinSession([
 
 The module structure:
 <<[[microsoft.py]]>>=
+import logging
 import os
 import shlex
 import subprocess
@@ -73,6 +74,8 @@ import urllib.parse
 from lxml import etree, html
 
 import weblogin
+
+logger = logging.getLogger(__name__)
 
 <<Azure MFA handler>>
 @
@@ -142,6 +145,10 @@ class AzureMFA(weblogin.AutologinHandler):
     self.__logging_in = True
 
     try:
+      logger.debug(
+        "AzureMFA starting for %s",
+        weblogin._sanitize_url(response.url),
+      )
       <<extract MFA number>>
       <<notify user of MFA number>>
       <<wait for MFA approval>>
@@ -154,11 +161,14 @@ We use the same [[self.__logging_in]] guard as the other handlers
 to prevent re-entrant invocations while we are polling.
 That guard must also be exception-safe: if notification or polling raises, we
 still need later MFA challenges to be detectable.
+The pages in this flow carry both hidden form fields and the MFA number itself,
+so the debug logging must not expose either one.
 
 The tests use mock responses because a live integration test would
 require real MFA interaction.
 
 <<test [[microsoft.py]]>>=
+import logging
 import weblogin
 import weblogin.microsoft as microsoft
 from weblogin.microsoft import AzureMFA
@@ -329,7 +339,13 @@ if doc_tree is None:
 elements = doc_tree.xpath(
   f"//p[@id='{self.MFA_ELEMENT_ID}']"
 )
-return len(elements) > 0
+has_challenge = len(elements) > 0
+if has_challenge:
+  logger.debug(
+    "AzureMFA detected challenge at %s",
+    weblogin._sanitize_url(response.url),
+  )
+return has_challenge
 @
 
 We can verify the detection logic with small mock pages.
@@ -425,6 +441,24 @@ def test_mfa_detected_xhtml_response_with_xml_declaration():
     }
   )
   assert handler.need_login(response)
+@
+
+The debug logs must not leak the MFA token or the number itself.
+
+<<test functions>>=
+def test_mfa_logging_redacts_query_and_number(caplog):
+  handler = AzureMFA(url="https://login.ug.kth.se")
+  response = MockResponse(
+    MFA_HTML,
+    url="https://login.ug.kth.se/auth?ctx=secret"
+  )
+
+  with caplog.at_level(logging.DEBUG, logger="weblogin.microsoft"):
+    assert handler.need_login(response)
+
+  assert "ctx=secret" not in caplog.text
+  assert "42" not in caplog.text
+  assert "https://login.ug.kth.se/auth?..." in caplog.text
 @
 
 
@@ -531,13 +565,16 @@ if notification_cmd is None:
   notification_cmd = self.__notification_cmd
 
 if notification_cmd:
+  logger.debug("AzureMFA using notification command")
   subprocess.run(
     shlex.split(notification_cmd) + [mfa_message]
   )
 else:
   try:
+    logger.debug("AzureMFA using figlet notification fallback")
     subprocess.run(["figlet", mfa_message], check=True)
   except FileNotFoundError:
+    logger.debug("AzureMFA using plain stdout notification fallback")
     print(mfa_message)
 @
 
@@ -706,6 +743,10 @@ action_url = urllib.parse.urljoin(
 As explained above, we call the parent class method directly to
 bypass the handler loop.
 <<post form, bypassing handler loop>>=
+logger.debug(
+  "AzureMFA polling %s",
+  weblogin._sanitize_url(action_url),
+)
 current_response = requests.Session.request(
   session, form.method, action_url, data=data
 )
@@ -725,6 +766,10 @@ elements = resolved_tree.xpath(
   f"//p[@id='{self.MFA_ELEMENT_ID}']"
 )
 if len(elements) == 0:
+  logger.debug(
+    "AzureMFA challenge resolved at %s",
+    weblogin._sanitize_url(current_response.url),
+  )
   break
 @
 
