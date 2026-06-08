@@ -261,18 +261,98 @@ finally:
 @
 
 In the case where we just get the unauthorized, we have to simulate a redirect.
-We do this using the [[login_trigger_url]].
-We make a request to [[login_trigger_url]], this will trigger a redirect and we 
+We make a request to a trigger URL, this will trigger a redirect and we
 can log in using the method above.
-When we've done that, we must re-run the original request (the one that didn't 
+When we've done that, we must re-run the original request (the one that didn't
 trigger a redirect) and return the reply from the new request.
+
+We prefer the trigger URL that the responding server advertises in its
+[[X-Forms_Based_Auth_Required]] header, falling back to the configured
+[[login_trigger_url]] only when the header is absent.
+SharePoint answers an unauthenticated REST call with a 403 whose
+[[X-Forms_Based_Auth_Required]] header points at the exact forms-login page
+for that endpoint; reading it here lets one handler bootstrap any endpoint on
+a host without baking an endpoint-specific trigger into the handler at
+construction.
+That matters for shared, long-lived sessions: a single
+[[UGlogin]] scoped by [[base_url]] can serve every file, folder, and
+site-page request on the same host, so callers no longer need to swap in a
+fresh handler per endpoint.
+Services that do not advertise the header keep working through the configured
+[[login_trigger_url]].
 <<trigger redirect to login page>>=
+trigger_url = (response.headers.get("X-Forms_Based_Auth_Required")
+               or self.__login_trigger_url)
 logger.debug(
   "UGlogin bootstrapping redirect via %s",
-  weblogin._sanitize_url(self.__login_trigger_url),
+  weblogin._sanitize_url(trigger_url),
 )
-trigger_response = session.get(self.__login_trigger_url)
+trigger_response = session.get(trigger_url)
 final_response = self.login(session, trigger_response)
+@
+
+We can verify the header preference directly.
+When the unauthorized response advertises a forms-login URL, that URL---not
+the configured trigger---is what we bootstrap from.
+
+<<test functions>>=
+def test_uglogin_uses_forms_auth_header_as_trigger():
+  """A 403 with X-Forms_Based_Auth_Required bootstraps via that URL."""
+  ug = UGlogin("dbosk", "secret",
+               login_trigger_url="https://host/configured",
+               base_url="https://host")
+  session = weblogin.AutologinSession([ug])
+
+  forbidden = requests.Response()
+  forbidden.status_code = requests.codes.forbidden
+  forbidden.url = "https://host/_api/web/GetFolderByServerRelativeUrl"
+  forbidden.headers["X-Forms_Based_Auth_Required"] = \
+    "https://host/_forms/default.aspx?Source=%2Fsites"
+  forbidden.history = []
+
+  authenticated = requests.Response()
+  authenticated.status_code = requests.codes.ok
+  authenticated.url = "https://host/_forms/default.aspx"
+  authenticated._content = b"<html><body>ok</body></html>"
+  authenticated.history = []
+
+  with mock.patch.object(
+      session, "get", return_value=authenticated, autospec=True) as get_mock:
+    response = ug.login(session, forbidden)
+
+  assert response is authenticated
+  get_mock.assert_called_once_with(
+    "https://host/_forms/default.aspx?Source=%2Fsites")
+@
+
+Without the header, we keep the previous behaviour and bootstrap from the
+configured [[login_trigger_url]], so services that do not advertise the
+header are unaffected.
+
+<<test functions>>=
+def test_uglogin_falls_back_to_configured_trigger_without_header():
+  """Absent the header, the configured login_trigger_url is used."""
+  ug = UGlogin("dbosk", "secret",
+               login_trigger_url="https://host/configured",
+               base_url="https://host")
+  session = weblogin.AutologinSession([ug])
+
+  forbidden = requests.Response()
+  forbidden.status_code = requests.codes.forbidden
+  forbidden.url = "https://host/api/thing"
+  forbidden.history = []
+
+  authenticated = requests.Response()
+  authenticated.status_code = requests.codes.ok
+  authenticated.url = "https://host/configured"
+  authenticated._content = b"<html><body>ok</body></html>"
+  authenticated.history = []
+
+  with mock.patch.object(
+      session, "get", return_value=authenticated, autospec=True) as get_mock:
+    ug.login(session, forbidden)
+
+  get_mock.assert_called_once_with("https://host/configured")
 @
 
 The [[base_url]] and [[login_trigger_url]] are deliberately independent:
