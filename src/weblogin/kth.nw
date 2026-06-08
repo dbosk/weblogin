@@ -386,6 +386,8 @@ def test_base_url_scopes_independently_of_trigger():
     login_trigger_url="https://app.kth.se/ug-gruppeditor/")
   assert not narrow_handler.need_login(broad_403)
 
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_stayawhile_login_page():
   """UGlogin with separate base_url reaches Stay A While login page."""
   sa = UGlogin(
@@ -623,11 +625,14 @@ if saml_response.status_code != requests.codes.ok:
 final_response = saml_response
 @
 
-The remaining checks are live end-to-end tests against KTH.
-They verify that the complete handler still works against the real
-services.
-Because these tests talk to production systems, we reuse a shared
-session-scoped fixture from [[tests/conftest.py]].
+This module mixes two kinds of tests: fast unit tests that drive the
+handlers with fabricated or mocked responses, and live end-to-end tests
+that talk to the real KTH services (reusing a shared session-scoped
+fixture from [[tests/conftest.py]]).
+We do not mark the whole module live; instead each live test carries its
+own [[@pytest.mark.live]] (and [[@pytest.mark.kth_live]]) so that the
+default [[-m "not live"]] run still exercises the unit tests, while the
+live targets select only the end-to-end ones.
 <<test [[kth.py]]>>=
 import logging
 import os
@@ -639,8 +644,6 @@ import weblogin
 import weblogin.microsoft
 from weblogin.kth import UGlogin
 
-pytestmark = [pytest.mark.live, pytest.mark.kth_live]
-
 <<test functions>>
 @
 
@@ -648,6 +651,8 @@ The first live request exercises the UI path, where the browser-style
 request chain redirects automatically through the login service.
 
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_get_ui(kth_live_session):
   response = kth_live_session.get(
     "https://app.kth.se/ug-gruppeditor/"
@@ -655,6 +660,8 @@ def test_get_ui(kth_live_session):
   assert response.status_code == requests.codes.ok and \
     response.url.startswith("https://app.kth.se")
 
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_get_api(kth_live_session):
   response = kth_live_session.get(
     "https://app.kth.se/ug-gruppeditor/api/ug/groups"
@@ -666,6 +673,8 @@ def test_get_api(kth_live_session):
 Next, we'll do the same test using KTH Forms, since that gives forbidden 
 instead of unauthorized.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_get_form_admin(kth_form_live_session):
   response = kth_form_live_session.get(
     "https://www.kth.se/form/admin/api/webform/"
@@ -686,6 +695,8 @@ looping.
 <<test functions>>=
 PARTICIPANTS_URL = "https://app.kth.se/studentlistor/kurstillfallen"
 
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_shared_session_participants_api():
   """Multiple UGlogin handlers don't loop on participants API."""
   ug = UGlogin(
@@ -717,6 +728,8 @@ def test_shared_session_participants_api():
 The ordinary failure case should still raise [[AuthenticationError]].
 
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.kth_live
 def test_auth_fail():
   ug = weblogin.AutologinSession([
       UGlogin("invalid user", "wrong password",
