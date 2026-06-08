@@ -65,6 +65,7 @@ The module structure:
 <<[[microsoft.py]]>>=
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -78,6 +79,8 @@ import weblogin
 logger = logging.getLogger(__name__)
 
 <<Azure MFA handler>>
+
+<<Microsoft federation handler>>
 @
 
 
@@ -169,6 +172,8 @@ require real MFA interaction.
 
 <<test [[microsoft.py]]>>=
 import logging
+import urllib.parse
+
 import weblogin
 import weblogin.microsoft as microsoft
 from weblogin.microsoft import AzureMFA
@@ -806,4 +811,433 @@ def test_mfa_resets_logging_in_after_exception(monkeypatch):
     assert False
 
   assert handler.need_login(response)
+@
+
+
+\section{Federated sign-in via [[domain_hint]]}
+\label{MicrosoftLoginHandler}
+
+When a federated tenant uses an external identity provider (IdP)---such
+as KTH's ADFS at [[login.ug.kth.se]]---a typical SharePoint or Office
+365 access flow lands the browser on
+[[https://login.microsoftonline.com/<tenant>/oauth2/authorize?...]].
+That page is the Azure AD \enquote{ConvergedSignIn} screen, served as a
+[[200]] HTML response whose actual login UI is constructed entirely by
+JavaScript: there is no server-rendered [[<form>]] for our existing
+scrapers to fill in.
+The page uses Microsoft's home-realm-discovery (HRD) flow to ask the
+user which IdP to use, and only then redirects to that IdP.
+
+Without help, none of the existing handlers ([[UGlogin]], [[SAMLlogin]],
+[[AzureMFA]]) can drive this page: there is no form, no MFA element,
+and (worse) [[UGlogin]] sees the page on a hand-off from a [[403]] and
+cannot find anything to fill in, so it concludes \enquote{already
+authenticated} and replays the original failing request, looping
+forever.
+
+OAuth 2.0 / OpenID Connect specifies a query parameter,
+[[domain_hint]], that lets the relying party tell Azure AD which
+federated domain to use, bypassing HRD entirely.\footnote{See
+\enquote{home realm discovery policy} in the Microsoft identity
+platform documentation.}
+Adding [[\&domain_hint=ug.kth.se]] to the authorize URL turns the
+[[200]] HTML page into a [[302]] straight to
+[[login.ug.kth.se/adfs/ls/?...]], which our existing [[SAMLlogin]] and
+[[UGlogin]] handlers already know how to drive.
+This is dramatically simpler than scripting the JavaScript HRD UI: we
+do not parse the authorize page at all, we just re-issue the same URL
+with one extra query parameter and let downstream handlers finish.
+
+The class is generic: the [[domain_hint]] is a required argument so
+non-KTH callers must provide their own, and the set of recognised hosts
+is configurable so callers can extend or restrict matching to other
+Microsoft endpoints (for instance,
+[[autologon.microsoftazuread-sso.com]] for seamless SSO).
+
+Usage example:
+\begin{minted}{python}
+from weblogin import kth, microsoft
+
+session = weblogin.AutologinSession([
+    microsoft.MicrosoftLogin(domain_hint="ug.kth.se"),
+    kth.SAMLlogin(),
+    kth.UGlogin(username, password,
+                login_trigger_url=forms_auth_url),
+    microsoft.AzureMFA(url="https://login.ug.kth.se"),
+])
+\end{minted}
+
+[[MicrosoftLogin]] should appear \emph{before} [[UGlogin]] and
+[[SAMLlogin]] so it claims the Azure AD authorize page first; otherwise
+[[UGlogin]] may misclassify the JavaScript page as a successful
+authentication.
+
+<<Microsoft federation handler>>=
+class MicrosoftLogin(weblogin.AutologinHandler):
+  """
+  Login handler for Microsoft Azure AD federated sign-in.
+
+  Detects the Azure AD ``oauth2/authorize`` page and re-issues the
+  request with a ``domain_hint`` query parameter, forcing Azure AD
+  to redirect directly to the federated identity provider and
+  bypass the JavaScript home-realm-discovery UI.
+
+  - ``domain_hint``: required, e.g. ``"ug.kth.se"``. Appended to
+    the authorize URL.
+  - ``tenant``: optional tenant filter (GUID, name, or
+    ``"common"``). When set, only authorize URLs whose path begins
+    with this tenant trigger the handler.
+  - ``hosts``: tuple of hostnames to recognise as Azure AD
+    endpoints. Defaults to the three current public hosts.
+  """
+  DEFAULT_HOSTS = (
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "autologon.microsoftazuread-sso.com",
+  )
+  AUTHORIZE_PATH_RE = re.compile(
+    r"^/(?P<tenant>[^/]+)/oauth2(?:/v2\.0)?/authorize/?$"
+  )
+
+  def __init__(self, domain_hint, tenant=None,
+               hosts=DEFAULT_HOSTS):
+    super().__init__()
+    if not domain_hint:
+      raise ValueError(
+        "MicrosoftLogin requires a non-empty domain_hint"
+      )
+    self.__domain_hint = domain_hint
+    self.__tenant = tenant
+    self.__hosts = tuple(hosts)
+    self.__logging_in = False
+
+  <<MicrosoftLogin URL match helper>>
+
+  <<MicrosoftLogin need_login>>
+
+  <<MicrosoftLogin login>>
+@
+
+The [[need_login]] check, the loop guard inside [[login]], and any
+future read of the authorize URL all need to answer the same question:
+\enquote{is this an Azure AD authorize URL we should rewrite?}
+Centralising that question in one helper keeps the matching rules in a
+single place---host membership, path shape, and optional tenant
+filtering---and means the loop guard cannot drift out of sync with the
+detector.
+
+The helper returns the parsed URL on a match (so the caller can reuse
+the parse result without re-parsing), and [[None]] otherwise.
+<<MicrosoftLogin URL match helper>>=
+def _match_authorize_url(self, url):
+  parsed = urllib.parse.urlparse(url)
+  if parsed.hostname not in self.__hosts:
+    return None
+  match = self.AUTHORIZE_PATH_RE.match(parsed.path)
+  if not match:
+    return None
+  if self.__tenant is not None \
+      and match.group("tenant") != self.__tenant:
+    return None
+  return parsed
+@
+
+The detection check is then a thin wrapper around the helper plus a
+loop guard: if the response URL already carries [[domain_hint=]], we
+have already rewritten it once and another rewrite would loop, so we
+decline.
+We deliberately do not inspect the response body.
+The authorize page is JavaScript-driven and may render differently
+across tenants and Azure AD updates; URL shape is the stable signal.
+<<MicrosoftLogin need_login>>=
+def need_login(self, response):
+  """
+  Returns True if the response is an Azure AD ``oauth2/authorize``
+  page that has not yet been rewritten with ``domain_hint``.
+  """
+  if self.__logging_in:
+    return False
+
+  parsed = self._match_authorize_url(response.url)
+  if parsed is None:
+    return False
+
+  query = urllib.parse.parse_qs(parsed.query)
+  if "domain_hint" in query:
+    return False
+
+  logger.debug(
+    "MicrosoftLogin detected authorize page at %s",
+    weblogin._sanitize_url(response.url),
+  )
+  return True
+@
+
+The [[login]] step rebuilds the URL with [[domain_hint]] appended.
+We use [[parse_qsl]] + [[urlencode]] (rather than naive string
+concatenation) so that any pre-existing query parameters with shell or
+URL metacharacters survive intact, and so a request that already
+carries an empty [[domain_hint=]] is replaced rather than duplicated.
+
+After the GET we still do not interpret the result.
+The expected outcome is a [[302]] (followed automatically by
+[[requests]]) to the federated IdP, where [[SAMLlogin]] and
+[[UGlogin]] take over via the [[AutologinSession]] handler loop on
+each intermediate response.
+
+Crucially, we return that resulting response directly rather than
+replaying [[args]].
+In the SharePoint flow, [[MicrosoftLogin]] runs inside the handler loop
+for the bootstrap request that [[UGlogin]] used to reach Azure AD, so
+[[args]] still refer to that bootstrap [[/_forms/default.aspx]] request.
+Replaying it here would restart the SharePoint trigger before
+[[UGlogin]] could inspect the federated login page, creating an
+infinite loop.
+Returning the federated response preserves the nesting: the outer
+handler receives the ADFS page and can continue the login.
+<<MicrosoftLogin login>>=
+def login(self, session, response, args=None, kwargs=None):
+  """
+  Re-issues the authorize URL with ``domain_hint`` appended so
+  that Azure AD redirects directly to the federated identity
+  provider.
+  """
+  parsed = self._match_authorize_url(response.url)
+  if parsed is None:
+    raise weblogin.AuthenticationError(
+      "MicrosoftLogin invoked on non-authorize URL"
+    )
+
+  query_pairs = [
+    (k, v)
+    for k, v in urllib.parse.parse_qsl(
+      parsed.query, keep_blank_values=True
+    )
+    if k != "domain_hint"
+  ]
+  query_pairs.append(("domain_hint", self.__domain_hint))
+  new_url = urllib.parse.urlunparse(
+    parsed._replace(query=urllib.parse.urlencode(query_pairs))
+  )
+
+  self.__logging_in = True
+  try:
+    logger.debug(
+      "MicrosoftLogin rewriting %s with domain_hint",
+      weblogin._sanitize_url(response.url),
+    )
+    final_response = session.get(new_url)
+  finally:
+    self.__logging_in = False
+
+  return final_response
+@
+
+The tests use the same [[MockResponse]] machinery as the [[AzureMFA]]
+tests above.
+A few small additions are required: a fake session that records the
+URLs it is asked to fetch, and short factory helpers for plausible
+authorize URLs.
+
+<<test functions>>=
+AUTHORIZE_URL = (
+  "https://login.microsoftonline.com/"
+  "3db27ecc-1791-4dda-9b51-798adfa4a3ca/oauth2/authorize"
+  "?client_id=00000003-0000-0ff1-ce00-000000000000"
+  "&response_type=code&state=abc"
+)
+
+V2_AUTHORIZE_URL = (
+  "https://login.microsoftonline.com/common/oauth2/v2.0/"
+  "authorize?client_id=app&state=xyz"
+)
+
+class FakeSession:
+  def __init__(self, response=None):
+    self.gets = []
+    self.requests = []
+    self._response = response or MockResponse("ok")
+
+  def get(self, url):
+    self.gets.append(url)
+    return self._response
+
+  def request(self, *args, **kwargs):
+    self.requests.append((args, kwargs))
+    return self._response
+@
+
+A bare authorize URL on any of the recognised hosts must trigger the
+handler.
+
+<<test functions>>=
+def test_microsoftlogin_detects_authorize_url():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  assert handler.need_login(MockResponse("", url=AUTHORIZE_URL))
+@
+
+The v2.0 endpoint shares the same logical role and must also match.
+
+<<test functions>>=
+def test_microsoftlogin_detects_v2_authorize_url():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  assert handler.need_login(
+    MockResponse("", url=V2_AUTHORIZE_URL)
+  )
+@
+
+The two alternative Azure AD hosts must be recognised by default.
+
+<<test functions>>=
+def test_microsoftlogin_detects_alternative_hosts():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  for host in ("login.microsoft.com",
+               "autologon.microsoftazuread-sso.com"):
+    url = f"https://{host}/common/oauth2/authorize?x=1"
+    assert handler.need_login(MockResponse("", url=url)), host
+@
+
+A response from an unrelated host must be ignored, even if the path
+looks similar.
+
+<<test functions>>=
+def test_microsoftlogin_ignores_unrelated_hosts():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  url = "https://evil.example.com/common/oauth2/authorize?x=1"
+  assert not handler.need_login(MockResponse("", url=url))
+@
+
+Once we have rewritten a URL once, the response carries
+[[domain_hint=]] and a second rewrite would loop. The handler must
+detect this and decline.
+
+<<test functions>>=
+def test_microsoftlogin_skips_when_domain_hint_present():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  url = AUTHORIZE_URL + "&domain_hint=ug.kth.se"
+  assert not handler.need_login(MockResponse("", url=url))
+@
+
+A tenant filter restricts matches to one specific tenant, leaving
+other tenants untouched.
+
+<<test functions>>=
+def test_microsoftlogin_tenant_filter_matches():
+  handler = microsoft.MicrosoftLogin(
+    domain_hint="ug.kth.se",
+    tenant="3db27ecc-1791-4dda-9b51-798adfa4a3ca",
+  )
+  assert handler.need_login(MockResponse("", url=AUTHORIZE_URL))
+
+def test_microsoftlogin_tenant_filter_rejects_other():
+  handler = microsoft.MicrosoftLogin(
+    domain_hint="ug.kth.se",
+    tenant="other-tenant",
+  )
+  assert not handler.need_login(
+    MockResponse("", url=AUTHORIZE_URL)
+  )
+@
+
+While the handler is mid-login, re-entrant detection must be
+suppressed so that the [[session.get]] inside [[login]] cannot
+re-trigger the same handler.
+
+<<test functions>>=
+def test_microsoftlogin_suppresses_reentrancy():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  session = FakeSession()
+  handler.login(session, MockResponse("", url=AUTHORIZE_URL))
+  # After login completes the guard must be reset.
+  assert handler.need_login(MockResponse("", url=AUTHORIZE_URL))
+@
+
+The [[login]] method must append [[domain_hint]] while preserving the
+original query parameters byte-for-byte.
+
+<<test functions>>=
+def test_microsoftlogin_appends_domain_hint():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  session = FakeSession()
+  handler.login(session, MockResponse("", url=AUTHORIZE_URL))
+
+  assert len(session.gets) == 1
+  rewritten = session.gets[0]
+  parsed = urllib.parse.urlparse(rewritten)
+  query = urllib.parse.parse_qs(parsed.query)
+  assert query["domain_hint"] == ["ug.kth.se"]
+  assert query["client_id"] == [
+    "00000003-0000-0ff1-ce00-000000000000"
+  ]
+  assert query["state"] == ["abc"]
+@
+
+If the URL already carries a different (or empty) [[domain_hint]],
+the handler replaces it rather than appending a duplicate.
+The detection guard prevents this in normal use, but [[login]] must
+still be safe when called directly.
+
+<<test functions>>=
+def test_microsoftlogin_replaces_existing_domain_hint():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  session = FakeSession()
+  url = AUTHORIZE_URL + "&domain_hint="
+  handler.login(session, MockResponse("", url=url))
+
+  rewritten = session.gets[0]
+  query = urllib.parse.parse_qs(
+    urllib.parse.urlparse(rewritten).query,
+    keep_blank_values=True,
+  )
+  assert query["domain_hint"] == ["ug.kth.se"]
+@
+
+The critical regression is the nested-handler case described above.
+When the authorize page came from a bootstrap request with redirect
+history, [[MicrosoftLogin]] must return the federated response to its
+caller instead of replaying that bootstrap request.
+Otherwise the caller---typically [[UGlogin]] in a SharePoint flow---
+never sees the ADFS page and the whole round-trip restarts.
+
+<<test functions>>=
+def test_microsoftlogin_returns_federated_response_without_replay():
+  handler = microsoft.MicrosoftLogin(domain_hint="ug.kth.se")
+  federated = MockResponse(
+    "",
+    url="https://login.ug.kth.se/adfs/ls/?wa=wsignin1.0",
+  )
+  session = FakeSession(response=federated)
+  response = MockResponse("", url=AUTHORIZE_URL)
+  response.history = [
+    MockResponse(
+      "",
+      url="https://kth-my.sharepoint.com/_forms/default.aspx",
+    )
+  ]
+  args = (
+    "GET",
+    "https://kth-my.sharepoint.com/_forms/default.aspx",
+  )
+  kwargs = {"allow_redirects": True}
+  returned = handler.login(
+    session,
+    response,
+    args=args,
+    kwargs=kwargs,
+  )
+
+  assert returned is federated
+  assert session.requests == []
+@
+
+Finally, omitting [[domain_hint]] entirely is a programming error and
+must fail loudly so the handler is never installed in a no-op state.
+
+<<test functions>>=
+def test_microsoftlogin_requires_domain_hint():
+  import pytest
+  with pytest.raises(ValueError):
+    microsoft.MicrosoftLogin(domain_hint="")
+  with pytest.raises(TypeError):
+    microsoft.MicrosoftLogin()
 @
