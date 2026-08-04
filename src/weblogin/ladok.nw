@@ -83,6 +83,8 @@ class SSOlogin(weblogin.AutologinHandler):
     if args and response.history:
       return session.request(*args, **kwargs)
     return ladok_response
+
+  <<SSOlogin methods>>
 @
 
 We note that while we're logging in, we don't want those requests interrupted 
@@ -126,11 +128,19 @@ We will get the record of the currently logged in user from LADOK.
 We will use author's institution for this test, which means only the author can 
 run this test.
 
-Now this illustrates that this login handler only fulfills a small part of the 
+Now this illustrates that this login handler only fulfills a small part of the
 login procedure.
-We need two more handlers in this case, one for the SAML implementation 
-([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the 
+We need two more handlers in this case, one for the SAML implementation
+([[weblogin.kth.SAMLlogin]] below) and one for the actual logging in at the
 institution ([[weblogin.kth.UGlogin]] below).
+
+Like [[test_kth.py]], this module mixes fast unit tests driving the handler
+with fabricated responses and live end-to-end tests against the real LADOK
+services.
+We do not mark the whole module live; instead each live test carries its own
+[[@pytest.mark.live]] (and [[@pytest.mark.ladok_live]]) so that the default
+[[-m "not live"]] run still exercises the unit tests, while the live targets
+select only the end-to-end ones.
 <<test [[ladok.py]]>>=
 import json
 import os
@@ -139,8 +149,6 @@ import pytest
 import requests
 import weblogin
 from weblogin import kth, ladok, microsoft
-
-pytestmark = [pytest.mark.live, pytest.mark.ladok_live]
 
 def make_ladok_request(session):
   <<set up headers for API request>>
@@ -277,16 +285,30 @@ except json.JSONDecodeError as err:
 
 There are two cases:
 \begin{enumerate}
-\item We get a 401 unauthorized for a [[ladok.se]] URL.
+\item We get a 401 unauthorized from a LADOK host in \emph{our} environment.
 \item We get redirected to the login server.
 \end{enumerate}
-Thus, we can detect this with either the return code or if the URL starts with 
+Thus, we can detect this with either the return code or if the URL starts with
 the URL to the login service, then we need to log in.
-However, as noted above, this only applies if we're not already underway with a 
+However, as noted above, this only applies if we're not already underway with a
 login.
+
+The restriction to our own environment in the first case deserves an
+explanation.
+Thanks to [[add_handler]], one [[AutologinSession]] can be shared by several
+modules, and in particular a production handler and a test-environment handler
+can serve the same session---that way they share the SSO and MFA state, so the
+user authenticates only once for both environments.
+But [[login]] can only establish a session for its own [[self.__base_url]]: if
+we claimed a 401 from the \emph{other} environment, we would log in to the
+wrong host and either hand back an unrelated page as the response or loop,
+re-issuing a request we can never fix.
+An earlier version checked [[if "ladok.se" in response.url]], which matched
+both environments---and, since it searched the whole URL rather than the host,
+even a 401 from [[evil.com/ladok.se]] would have triggered a login.
 <<check if we're redirected to login server>>=
 if response.status_code == requests.codes.unauthorized \
-     and "ladok.se" in response.url:
+     and self.same_environment(response.url):
   logger.debug(
     "SSOlogin detected %s for %s",
     response.status_code,
@@ -301,6 +323,82 @@ elif response.url.startswith(self.__login_url):
   return True
 
 return False
+@
+
+\subsection{Which environment does a URL belong to?}
+
+We cannot simply compare the URL's host to [[self.__base_url]]'s host:
+LADOK serves its API from [[www.start.ladok.se]] and [[www.test.ladok.se]],
+while the login redirects use [[start.ladok.se]] and [[start.test.ladok.se]].
+Exact host equality would thus miss the very 401s that need a login.
+What reliably separates the two environments is the domain: every test host
+lives under [[test.ladok.se]], no production host does.
+So we compare \emph{environment membership}: the URL's host must be a
+[[ladok.se]] host, and it must be a test host exactly when our own base URL
+is.
+We parse with [[urllib.parse]] rather than substring matching so that only
+the host---not the path or query---can make the decision.
+<<SSOlogin methods>>=
+def same_environment(self, url):
+  """
+  Returns True if `url` refers to a LADOK host in the same environment
+  (production or test) as this handler, False otherwise.
+  """
+  host = urllib.parse.urlparse(url, allow_fragments=False).netloc
+  if host != "ladok.se" and not host.endswith(".ladok.se"):
+    return False
+  own_host = urllib.parse.urlparse(self.__base_url).netloc
+  return self.is_test_environment_host(host) \
+      == self.is_test_environment_host(own_host)
+
+@staticmethod
+def is_test_environment_host(host):
+  """
+  Returns True if the domain name `host` belongs to LADOK's test
+  environment, False for any other host (including production ones).
+  """
+  return host == "test.ladok.se" or host.endswith(".test.ladok.se")
+@
+
+Let's verify that each handler claims exactly the 401s of its own
+environment: the production handler must claim production API hosts but
+ignore the test environment, and vice versa.
+We also check that a [[ladok.se]] appearing in the \emph{path} of a URL on
+some other host no longer fools the check.
+<<test functions>>=
+def make_unauthorized_response(url):
+  response = requests.Response()
+  response.status_code = requests.codes.unauthorized
+  response.url = url
+  response.history = []
+  return response
+
+def test_need_login_claims_own_environment():
+  prod = ladok.SSOlogin("KTH Royal Institute of Technology")
+  test = ladok.SSOlogin("KTH Royal Institute of Technology",
+                        test_environment=True)
+
+  prod_401 = make_unauthorized_response(
+    "https://www.start.ladok.se/gui/proxy/resultat")
+  assert prod.need_login(prod_401)
+  assert not test.need_login(prod_401)
+
+def test_need_login_ignores_other_environment():
+  prod = ladok.SSOlogin("KTH Royal Institute of Technology")
+  test = ladok.SSOlogin("KTH Royal Institute of Technology",
+                        test_environment=True)
+
+  test_401 = make_unauthorized_response(
+    "https://www.test.ladok.se/gui/proxy/resultat")
+  assert not prod.need_login(test_401)
+  assert test.need_login(test_401)
+
+def test_need_login_ignores_ladok_in_path():
+  prod = ladok.SSOlogin("KTH Royal Institute of Technology")
+
+  lookalike_401 = make_unauthorized_response(
+    "https://evil.com/ladok.se/gui/proxy/resultat")
+  assert not prod.need_login(lookalike_401)
 @
 
 The login URL\footnote{%
@@ -322,6 +420,8 @@ self.__login_url = f"{self.__base_url}/gui/loggain"
 
 We test if this works.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_test_environment(ladok_test_environment_live_session):
   response = make_test_environment_ladok_request(
     ladok_test_environment_live_session
@@ -435,10 +535,14 @@ Once these steps hand control to the university-specific handlers, the
 full login flow should reach the LADOK API successfully.
 
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_get_user_info(ladok_live_session):
   response = make_ladok_request(ladok_live_session)
   assert_ladok_user_info_response(response)
 
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_multiple_calls(ladok_live_session):
   response = make_ladok_request(ladok_live_session)
   assert_ladok_user_info_response(response)
@@ -475,6 +579,8 @@ class TrackingAzureMFA(microsoft.AzureMFA):
     self.challenge_count += 1
     return super().login(session, response, args, kwargs)
 
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_reuse_UG_session_for_LADOK_login():
   ug = TrackingUGlogin(
     os.environ["KTH_LOGIN"],
@@ -544,16 +650,22 @@ Even in this reduced configuration, we still add [[AzureMFA]] so
 that Microsoft's number-matching step can be completed during a
 successful live login.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_no_KTH_specific_handler(ladok_sso_live_session):
   response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
 
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_SSOlogin_multiple_requests(ladok_sso_live_session):
   response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
   response = make_ladok_request(ladok_sso_live_session)
   <<assert correctness of response>>
 
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_test_environment_SSOlogin(
     ladok_test_environment_sso_live_session):
   response = make_test_environment_ladok_request(
@@ -564,6 +676,8 @@ def test_test_environment_SSOlogin(
 
 We would also like to test if we can detect failed authentication.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_wrong_credentials():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology",
@@ -795,6 +909,8 @@ We'll start by providing a wrong password (username as well), so that the login
 will fail.
 This way we'll get back to the same page over and over.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_SSOlogin_infinite_loop():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology",
@@ -817,6 +933,8 @@ at all.
 This case returned a 500 error when we used [[//input]] instead of [[.//input]] 
 above.
 <<test functions>>=
+@pytest.mark.live
+@pytest.mark.ladok_live
 def test_SSOlogin_infinite_loop_no_credentials():
   ls = weblogin.AutologinSession([
           ladok.SSOlogin("KTH Royal Institute of Technology")
