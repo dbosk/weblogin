@@ -885,6 +885,10 @@ We log all forms at debug level on purpose: when yet another
 institution's page defeats the rule, the log shows exactly which forms
 were seen and which inputs they contain---precisely what we need in
 order to extend the rule.
+Note that we log [[list(form.inputs)]] rather than
+[[dict(form.inputs)]]: as a mapping, [[form.inputs]] collapses inputs
+that share a name, and such duplicates are just the kind of detail the
+log must not hide.
 <<helper functions>>=
 def select_login_form(response):
   """
@@ -902,7 +906,7 @@ def select_login_form(response):
     weblogin._sanitize_url(response.url),
   )
   for form in forms:
-    logger.debug("* %s", dict(form.inputs))
+    logger.debug("* %s", list(form.inputs))
 
   if not forms:
     return None
