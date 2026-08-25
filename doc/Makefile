@@ -22,6 +22,13 @@ weblogin.pdf: ../src/weblogin
 ../src/weblogin::
 	${MAKE} -C $@ all
 
+# The ../%:: rule below is a terminal pattern rule without
+# prerequisites, so it never fires for a file that already exists.
+# The woven .tex files need their .nw as prerequisite for an edited
+# source to trigger a recursive re-weave.
+../src/weblogin/%.tex: ../src/weblogin/%.nw
+	${MAKE} -C ../src/weblogin $*.tex
+
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
 
