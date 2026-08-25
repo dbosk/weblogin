@@ -492,26 +492,18 @@ logger.debug(
 )
 @
 
-Now we actually fetch the SAML server URL, which is called by [[entityID]].
-If there is an error here, we'd like to know what caused the error.
-So we'd like the exceptions to contain the data that caused the error.
+Now we actually fetch the SAML server URL, which is called the
+[[entityID]].
+The resolution---dispatching between ID and name lookup, and handling
+ambiguous or missing matches---is the same for any handler that uses
+SeamlessAccess, so it lives in the [[weblogin.seamlessaccess]] module
+(\cref{SeamlessAccessAPI}) rather than here.
 <<fetch institution SAML URL from SeamlessAccess>>=
-try:
-  if "{sha1}" in self.__institution:
-    sa_data = sa.get_entity_data_by_id(self.__institution)
-  else:
-    sa_data = sa.find_entity_data_by_name(self.__institution)
-    sa_data = sa_data[0]
-
-  entityID = sa_data["entityID"]
-  logger.debug(
-    "SSOlogin resolved institution %s to entityID",
-    self.__institution,
-  )
-except IndexError:
-  raise ValueError(f"{self.__institution} didn't give any match.")
-except KeyError:
-  raise Exception(f"SeamlessAccess.org returned unexpected result: {sa_data}")
+entityID = sa.find_entity_id(self.__institution)
+logger.debug(
+  "SSOlogin resolved institution %s to entityID",
+  self.__institution,
+)
 @
 
 Finally, we append that to the return URL and make the request.
