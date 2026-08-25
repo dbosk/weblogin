@@ -34,6 +34,8 @@ import urllib.parse
 
 logger = logging.getLogger(__name__)
 
+<<helper functions>>
+
 class SSOlogin(weblogin.AutologinHandler):
   """
   Login handler (weblogin.AutologinHandler) for LADOK logins.
@@ -145,6 +147,7 @@ select only the end-to-end ones.
 import json
 import os
 
+from lxml import html
 import pytest
 import requests
 import weblogin
@@ -749,13 +752,183 @@ Consider the examples in
 }
 \end{figure}
 
-Now, to find the form we must parse it.
-Then we'll use XPath to find it.
+Now, to find the form we must parse the page.
+But which form should we pick if the page has several?
+An earlier version always picked the first form, but the institutions
+design their pages differently.
+The University of Gothenburg uses JavaScript to guide the user through
+the login one field at a time; the form that we must submit sits hidden
+in the HTML, and it is the \emph{last} form on the page, not the first.
+Chalmers University also has several forms, but there the correct one
+\emph{is} the first one.
+So neither \enquote{always the first} nor \enquote{always the last}
+works.
+
+What the correct form has in common across institutions is its purpose:
+it is the one asking for the user's credentials.
+So rather than relying on the order of the forms, we look for a form
+with a password field, [[<input type="password">]].
+That gives us the following selection rule\footnote{%
+  Due to Christian Sattler,
+  \url{https://github.com/dbosk/weblogin/issues/34}.
+}:
+\begin{enumerate}
+\item If there is a unique password form, use it.
+\item Otherwise, if there is a unique form, use it.
+\item Otherwise, warn and default to the first form.
+\end{enumerate}
+The fallback preserves the old behaviour on pages where the rule fails
+to single out a form, and the warning makes such pages visible in the
+logs---the alternative, raising an exception, would break institutions
+that happen to work with the first form today.
+
+To recognize a password form we inspect the form's input elements.
+[[form.inputs]] also yields [[<select>]] and [[<textarea>]] elements,
+which lack the [[type]] accessor that [[lxml]] provides for
+[[<input>]], so we must check the tag before the type.
+<<helper functions>>=
+def is_password_form(form):
+  """
+  Returns True if the lxml `form` contains a password input
+  (`<input type="password">`), False otherwise.
+  """
+  return any(el.tag == "input" and el.type == "password"
+             for el in form.inputs)
+@
+
+Let's check that select and textarea elements don't trip the tag guard
+and that a password input is detected.
+<<test functions>>=
+def test_is_password_form():
+  page = html.fromstring("""
+    <html><body>
+      <form id="search">
+        <input type="text" name="q"/>
+        <select name="lang"><option>en</option></select>
+        <textarea name="comment"></textarea>
+      </form>
+      <form id="login">
+        <input type="text" name="username"/>
+        <input type="password" name="password"/>
+      </form>
+    </body></html>""")
+  search, login = page.forms
+  assert not ladok.is_password_form(search)
+  assert ladok.is_password_form(login)
+@
+
+With that, we can implement the selection rule.
+We log all forms at debug level on purpose: when yet another
+institution's page defeats the rule, the log shows exactly which forms
+were seen and which inputs they contain---precisely what we need in
+order to extend the rule.
+Note that we log [[list(form.inputs)]] rather than
+[[dict(form.inputs)]]: as a mapping, [[form.inputs]] collapses inputs
+that share a name, and such duplicates are just the kind of detail the
+log must not hide.
+<<helper functions>>=
+def select_login_form(response):
+  """
+  Selects the login form on the HTML page of the HTTP response
+  `response`.
+
+  Returns the unique password form if there is one; otherwise, the
+  only form if there is only one; otherwise, the first form (with a
+  warning). Returns None if the page has no forms.
+  """
+  doc_tree = html.fromstring(response.text)
+  forms = doc_tree.forms
+  logger.debug(
+    "Forms found in %s:",
+    weblogin._sanitize_url(response.url),
+  )
+  for form in forms:
+    logger.debug("* %s", list(form.inputs))
+
+  if not forms:
+    return None
+
+  password_forms = [form for form in forms if is_password_form(form)]
+  if len(password_forms) == 1:
+    return password_forms[0]
+
+  if len(forms) == 1:
+    return forms[0]
+
+  logger.warning("Page has multiple forms and no unique password "
+                 "form, defaulting to the first form.")
+  return forms[0]
+@
+
+Let's verify the rule on fabricated pages.
+We build the responses ourselves so that the tests run without any
+network access.
+<<test functions>>=
+def make_response_with_body(body):
+  response = requests.Response()
+  response.status_code = requests.codes.ok
+  response.url = "https://idp.example.com/login"
+  response._content = f"<html><body>{body}</body></html>".encode()
+  return response
+@
+
+A page with a single form is the common case: the form is chosen no
+matter what it contains.
+<<test functions>>=
+def test_select_login_form_single_form():
+  response = make_response_with_body("""
+    <form id="only"><input type="text" name="q"/></form>""")
+  form = ladok.select_login_form(response)
+  assert form.get("id") == "only"
+@
+
+The University of Gothenburg case: several forms where only the
+\emph{last} one asks for a password.
+This is the case that motivated the selection rule.
+<<test functions>>=
+def test_select_login_form_prefers_unique_password_form():
+  response = make_response_with_body("""
+    <form id="search"><input type="text" name="q"/></form>
+    <form id="fake"><input type="text" name="username"/></form>
+    <form id="login" style="display: none">
+      <input type="text" name="username"/>
+      <input type="password" name="password"/>
+    </form>""")
+  form = ladok.select_login_form(response)
+  assert form.get("id") == "login"
+@
+
+When no form asks for a password and there are several forms, we fall
+back to the first form, but we want the warning in the logs.
+The same applies when several forms ask for a password, since then the
+password criterion no longer singles one out.
+<<test functions>>=
+def test_select_login_form_multiple_forms_warns(caplog):
+  response = make_response_with_body("""
+    <form id="first"><input type="text" name="q"/></form>
+    <form id="second"><input type="text" name="s"/></form>""")
+  form = ladok.select_login_form(response)
+  assert form.get("id") == "first"
+  assert "defaulting to the first form" in caplog.text
+
+def test_select_login_form_multiple_password_forms_warns(caplog):
+  response = make_response_with_body("""
+    <form id="first"><input type="password" name="p1"/></form>
+    <form id="second"><input type="password" name="p2"/></form>""")
+  form = ladok.select_login_form(response)
+  assert form.get("id") == "first"
+  assert "defaulting to the first form" in caplog.text
+
+def test_select_login_form_no_form():
+  response = make_response_with_body("<p>No forms here.</p>")
+  assert ladok.select_login_form(response) is None
+@
+
+In the login loop we can now select the form; a page without any form
+still means that the login procedure has derailed.
 <<find form>>=
-doc_tree = html.fromstring(ladok_response.text)
-try:
-  form = doc_tree.xpath("//form")[0]
-except IndexError:
+form = select_login_form(ladok_response)
+if form is None:
   logger.debug(
     "SSOlogin found no form in %s",
     weblogin._sanitize_url(ladok_response.url),
@@ -886,20 +1059,21 @@ the forms.
 Whereas when we have an infinite loop (for example, when we use the wrong 
 password), the contents will be the same.
 So we'll use this fact.
+Note that we must record the inputs of the form we actually
+\emph{selected}---on a page with several forms, comparing the first
+form while submitting another would make the loop check watch the
+wrong form.
 <<init structure to detect infinite loops>>=
 prev = {}
 <<store data to detect infinite loops>>=
-inputs = html.fromstring(ladok_response.text).xpath("//form")[0].inputs.keys()
-prev[ladok_response.url] = inputs
+prev[ladok_response.url] = form.inputs.keys()
 @ Once we've made the request, we'll have a new response in [[ladok_response]].
-So we can extract the new forms and perform the check.
+So we can select the form of the new page, the same way as before, and
+perform the check.
 Of course, some pages might not contain any form.
 <<if we're in a loop>>=
-try:
-  new_inputs = \
-    html.fromstring(ladok_response.text).xpath("//form")[0].inputs.keys()
-except IndexError:
-  new_inputs = None
+new_form = select_login_form(ladok_response)
+new_inputs = new_form.inputs.keys() if new_form is not None else None
 if ladok_response.url in prev and new_inputs == prev[ladok_response.url]
 @ (Note that we don't want the ending colon in the [[if]] statement, because we 
 already have it in [[<<submit form>>]].)
