@@ -34,6 +34,8 @@ import urllib.parse
 
 logger = logging.getLogger(__name__)
 
+<<helper functions>>
+
 class SSOlogin(weblogin.AutologinHandler):
   """
   Login handler (weblogin.AutologinHandler) for LADOK logins.
@@ -338,6 +340,35 @@ So we compare \emph{environment membership}: the URL's host must be a
 is.
 We parse with [[urllib.parse]] rather than substring matching so that only
 the host---not the path or query---can make the decision.
+
+The check \enquote{is this host in that domain} is not specific to the
+environments: we need the same check for other domains during the
+login procedure below.
+Note that a substring or plain suffix check is not enough:
+[[ladok.se]] is a substring of both [[ladok.se.evil.com]] and
+[[evilladok.se]], and a suffix of the latter.
+A host is in a domain only if it \emph{is} the domain or ends with the
+domain preceded by a dot.
+So we make this a helper function.
+<<helper functions>>=
+def host_in_domain(host, domain):
+  """
+  Returns True if the domain name `host` is `domain` itself or a
+  subdomain of `domain`, False otherwise.
+  """
+  return host == domain or host.endswith("." + domain)
+@
+
+Let's verify that the lookalike hosts don't pass.
+<<test functions>>=
+def test_host_in_domain():
+  assert ladok.host_in_domain("ladok.se", "ladok.se")
+  assert ladok.host_in_domain("www.start.ladok.se", "ladok.se")
+  assert not ladok.host_in_domain("evilladok.se", "ladok.se")
+  assert not ladok.host_in_domain("ladok.se.evil.com", "ladok.se")
+@
+
+With that, environment membership reads as intended.
 <<SSOlogin methods>>=
 def same_environment(self, url):
   """
@@ -345,7 +376,7 @@ def same_environment(self, url):
   (production or test) as this handler, False otherwise.
   """
   host = urllib.parse.urlparse(url, allow_fragments=False).netloc
-  if host != "ladok.se" and not host.endswith(".ladok.se"):
+  if not host_in_domain(host, "ladok.se"):
     return False
   own_host = urllib.parse.urlparse(self.__base_url).netloc
   return self.is_test_environment_host(host) \
@@ -357,7 +388,7 @@ def is_test_environment_host(host):
   Returns True if the domain name `host` belongs to LADOK's test
   environment, False for any other host (including production ones).
   """
-  return host == "test.ladok.se" or host.endswith(".test.ladok.se")
+  return host_in_domain(host, "test.ladok.se")
 @
 
 Let's verify that each handler claims exactly the 401s of its own
@@ -476,11 +507,15 @@ response = session.get(f"{self.__base_url}/Shibboleth.sso/Logout"
 That URL will redirect to SeamlessAccess.org.
 But instead of using that page, we use the [[weblogin.seamlessaccess]] module.
 The aim is to find the URL to the institution's SAML server, which we do later.
-Since we don't use it, we want to extract the return URL, because that contains 
+Since we don't use it, we want to extract the return URL, because that contains
 some session information for the SAML request later.
+To check that we actually ended up at SeamlessAccess, we use
+[[host_in_domain]]: an earlier version checked whether
+[[seamlessaccess.org]] was a substring of the host, which a host like
+[[seamlessaccess.org.evil.com]] would also satisfy.
 <<fetch return URL from LADOK's SeamlessAccess request>>=
 parsed_url = urllib.parse.urlparse(response.url, allow_fragments=False)
-if "seamlessaccess.org" not in parsed_url.netloc:
+if not host_in_domain(parsed_url.netloc, "seamlessaccess.org"):
   raise weblogin.AuthenticationError(
                   f"seamlessaccess.org not in {parsed_url.netloc}")
 
@@ -516,13 +551,44 @@ except KeyError:
 
 Finally, we append that to the return URL and make the request.
 We note that we can return the response to this last request.
-This response will be intercepted by the other login handlers and eventually 
+This response will be intercepted by the other login handlers and eventually
 the real response will be returned to the original request.
+
+Appending a parameter to a URL by hand means choosing between [[?]]
+and [[&]] and, more importantly, remembering to percent-encode the
+value---the [[entityID]] is itself a URL, full of characters that have
+meaning in a query string.
+An earlier version appended it unencoded, which happened to work but
+relied on the server's leniency.
+We let [[urllib.parse]] take the URL apart and put it back together,
+so the encoding is handled for us.
+<<helper functions>>=
+def add_url_query_param(url, key, value):
+  """
+  Returns `url` with `key`=`value` appended to its query string,
+  properly encoded. Any existing query parameters are kept.
+  """
+  scheme, netloc, path, query, fragment = urllib.parse.urlsplit(url)
+  params = urllib.parse.parse_qsl(query)
+  params.append((key, value))
+  query = urllib.parse.urlencode(params)
+  return urllib.parse.urlunsplit((scheme, netloc, path, query, fragment))
+@
+
+Let's check both the with- and without-query cases, and that the value
+is encoded.
+<<test functions>>=
+def test_add_url_query_param():
+  assert ladok.add_url_query_param(
+      "https://example.com/path", "entityID", "https://idp.example.com"
+    ) == "https://example.com/path?entityID=https%3A%2F%2Fidp.example.com"
+  assert ladok.add_url_query_param(
+      "https://example.com/path?a=1", "b", "2"
+    ) == "https://example.com/path?a=1&b=2"
+@
+
 <<run return request with added institution SAML URL as entityID>>=
-if "?" in return_url:
-  return_url += f"&entityID={entityID}"
-else:
-  return_url += f"?entityID={entityID}"
+return_url = add_url_query_param(return_url, "entityID", entityID)
 
 logger.debug(
   "SSOlogin handing off to institution at %s",
@@ -714,15 +780,21 @@ vars=None,
 self.__vars = vars or {}
 @
 
-Now, if the other login handlers intercepted the requests, the final URL will 
+Now, if the other login handlers intercepted the requests, the final URL will
 be one on the [[ladok.se]] domain.
 This means that we can just iterate until that happens.
-Whenever we encounter a form, we simply fill it and post it (or get, whatever 
+Whenever we encounter a form, we simply fill it and post it (or get, whatever
 method is specified by the form).
+Here too we use [[host_in_domain]] rather than the earlier substring
+check: an institution whose host name merely contains [[ladok.se]]
+would otherwise end the loop prematurely, before we're actually back
+at LADOK.
 <<log in to login server>>=
 <<init structure to detect infinite loops>>
-while "ladok.se" not in \
-    urllib.parse.urlparse(ladok_response.url, allow_fragments=False).netloc:
+while not host_in_domain(
+    urllib.parse.urlparse(ladok_response.url,
+                          allow_fragments=False).netloc,
+    "ladok.se"):
   <<find form>>
   <<extract data and substitute variables>>
   <<submit form>>
