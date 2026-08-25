@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 <<test [[seamlessaccess.py]]>>=
 import pytest
 
-import weblogin.seamlessaccess as sa
 from weblogin.seamlessaccess import *
 
 <<test functions>>
@@ -177,42 +176,46 @@ data = matches[0]
 
 We test the resolution without network access by replacing the two
 lookup functions.
+We give [[monkeypatch]] the functions' dotted names, so that the
+patches land on the module object that [[find_entity_id]] reads its
+globals from---patching the star-imported names in the test module
+would have no effect there.
 First the dispatch: an ID must go to the ID lookup---we make the name
 search fail the test if it's ever consulted---and a name to the name
 search.
 <<test functions>>=
 def test_find_entity_id_dispatches_on_id_prefix(monkeypatch):
-  monkeypatch.setattr(sa, "get_entity_data_by_id",
+  monkeypatch.setattr("weblogin.seamlessaccess.get_entity_data_by_id",
     lambda institution: {"entityID": "https://idp.a.example.com"})
-  monkeypatch.setattr(sa, "find_entity_data_by_name",
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
     lambda institution: pytest.fail("searched by name"))
-  assert sa.find_entity_id("{sha1}0123abc") == "https://idp.a.example.com"
+  assert find_entity_id("{sha1}0123abc") == "https://idp.a.example.com"
 
 def test_find_entity_id_by_name(monkeypatch):
-  monkeypatch.setattr(sa, "find_entity_data_by_name",
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
     lambda institution: [{"title": "A University",
                           "id": "{sha1}aaa",
                           "entityID": "https://idp.a.example.com"}])
-  assert sa.find_entity_id("A University") == "https://idp.a.example.com"
+  assert find_entity_id("A University") == "https://idp.a.example.com"
 @
 
 Then the ambiguous and empty search results.
 <<test functions>>=
 def test_find_entity_id_ambiguous_warns(monkeypatch, caplog):
-  monkeypatch.setattr(sa, "find_entity_data_by_name",
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
     lambda institution: [{"title": "A University",
                           "id": "{sha1}aaa",
                           "entityID": "https://idp.a.example.com"},
                          {"title": "B University",
                           "id": "{sha1}bbb",
                           "entityID": "https://idp.b.example.com"}])
-  assert sa.find_entity_id("University") == "https://idp.a.example.com"
+  assert find_entity_id("University") == "https://idp.a.example.com"
   assert "Several institutions match" in caplog.text
   assert "{sha1}bbb" in caplog.text
 
 def test_find_entity_id_no_match(monkeypatch):
-  monkeypatch.setattr(sa, "find_entity_data_by_name",
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
     lambda institution: [])
   with pytest.raises(ValueError):
-    sa.find_entity_id("Nonexistent University")
+    find_entity_id("Nonexistent University")
 @
