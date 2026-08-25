@@ -6,19 +6,26 @@ There is a global service, SeamlessAccess.org, that provides SSO login services
 for academic institutions.
 Essentially, what it does is to provide a look-up service for academic identity 
 providers.
-We will provide two functions using SeamlessAccess.org:
+We will provide three functions using SeamlessAccess.org:
 \begin{enumerate}
 \item Search for an institution by name.
 \item Look up an institution by unique ID.
+\item Resolve an institution, given either way, to its entity ID.
 \end{enumerate}
 
 The module is structured as follows.
 <<[[seamlessaccess.py]]>>=
+import logging
+
 import requests
+
+logger = logging.getLogger(__name__)
 
 <<SeamlessAccess lookup functions>>
 @ We will test these functions using the following test script.
 <<test [[seamlessaccess.py]]>>=
+import pytest
+
 from weblogin.seamlessaccess import *
 
 <<test functions>>
@@ -93,7 +100,7 @@ def test_find_entity_data_by_name():
 @
 
 The resulting JSON data for this particular ID is the following.
-Note that the difference compared to the data in \cref{LookUpByID} is that this 
+Note that the difference compared to the data in \cref{LookUpByID} is that this
 is one element in a list.
 \begin{pycode}
 import json
@@ -106,3 +113,109 @@ print(json.dumps(
 ))
 print(r"\end{minted}")
 \end{pycode}
+
+\subsection{Resolving an institution to its entity ID}
+
+The higher-level handlers ([[weblogin.ladok.SSOlogin]], for instance)
+don't care about the raw entity data: what they need is the
+institution's [[entityID]], the URL identifying the institution's SAML
+identity provider.
+They also let the user identify the institution either by its unique
+ID or by a search string.
+The dispatch between the two lookups above is thus the same for every
+handler, so it belongs here rather than in each of them.
+
+An ID always begins with its hash-algorithm prefix, such as
+[[{sha1}]], so we dispatch on that prefix.
+An earlier version checked whether [[{sha1}]] occurred \emph{anywhere}
+in the string, which would misdirect a search string that merely
+mentions the prefix to the ID lookup.
+
+A name search may match several institutions, and we cannot tell which
+one the user meant.
+We warn, list the candidates and default to the first match: this
+keeps names convenient for interactive use, while the listed IDs in
+the warning show the user how to make the choice unambiguous.
+<<SeamlessAccess lookup functions>>=
+def find_entity_id(institution):
+  """
+  Resolves `institution` to the entity ID (the SAML IdP URL)
+  registered with SeamlessAccess.org.
+
+  `institution` is either a unique ID (starting with a hash prefix
+  such as `{sha1}`) or a search string, for example the institution's
+  name.
+
+  Raises ValueError if no institution matches. If several match,
+  warns and uses the first.
+  """
+  if institution.startswith("{sha1}"):
+    data = get_entity_data_by_id(institution)
+  else:
+    <<let [[data]] be the best match for the searched institution>>
+
+  try:
+    return data["entityID"]
+  except KeyError:
+    raise Exception(
+      f"SeamlessAccess.org returned unexpected result: {data}")
+@
+
+<<let [[data]] be the best match for the searched institution>>=
+matches = find_entity_data_by_name(institution)
+if not matches:
+  raise ValueError(f"{institution} didn't give any match.")
+if len(matches) > 1:
+  logger.warning("Several institutions match %s, using the first:",
+                 institution)
+  for match in matches:
+    logger.warning("* %s (%s)", match.get("title"), match.get("id"))
+  logger.warning("Use the institution's ID instead for precision.")
+data = matches[0]
+@
+
+We test the resolution without network access by replacing the two
+lookup functions.
+We give [[monkeypatch]] the functions' dotted names, so that the
+patches land on the module object that [[find_entity_id]] reads its
+globals from---patching the star-imported names in the test module
+would have no effect there.
+First the dispatch: an ID must go to the ID lookup---we make the name
+search fail the test if it's ever consulted---and a name to the name
+search.
+<<test functions>>=
+def test_find_entity_id_dispatches_on_id_prefix(monkeypatch):
+  monkeypatch.setattr("weblogin.seamlessaccess.get_entity_data_by_id",
+    lambda institution: {"entityID": "https://idp.a.example.com"})
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
+    lambda institution: pytest.fail("searched by name"))
+  assert find_entity_id("{sha1}0123abc") == "https://idp.a.example.com"
+
+def test_find_entity_id_by_name(monkeypatch):
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
+    lambda institution: [{"title": "A University",
+                          "id": "{sha1}aaa",
+                          "entityID": "https://idp.a.example.com"}])
+  assert find_entity_id("A University") == "https://idp.a.example.com"
+@
+
+Then the ambiguous and empty search results.
+<<test functions>>=
+def test_find_entity_id_ambiguous_warns(monkeypatch, caplog):
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
+    lambda institution: [{"title": "A University",
+                          "id": "{sha1}aaa",
+                          "entityID": "https://idp.a.example.com"},
+                         {"title": "B University",
+                          "id": "{sha1}bbb",
+                          "entityID": "https://idp.b.example.com"}])
+  assert find_entity_id("University") == "https://idp.a.example.com"
+  assert "Several institutions match" in caplog.text
+  assert "{sha1}bbb" in caplog.text
+
+def test_find_entity_id_no_match(monkeypatch):
+  monkeypatch.setattr("weblogin.seamlessaccess.find_entity_data_by_name",
+    lambda institution: [])
+  with pytest.raises(ValueError):
+    find_entity_id("Nonexistent University")
+@
