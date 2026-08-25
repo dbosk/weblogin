@@ -978,9 +978,64 @@ def form_submission_data(form, values_map=None, casefold=False):
   for name, value in form.form_values():
     data[name].append(value)
 
+  <<complete [[data]] with the form's valueless fields>>
   <<add the submit button to [[data]]>>
   <<override [[data]] with values from [[values_map]]>>
   return dict(data)
+@
+
+There is one difference between [[form.form_values()]] and a browser
+that matters here: [[lxml]] omits a control whose value is [[None]],
+that is, an input without a [[value]] attribute, while a browser
+submits such an input as the empty string.
+The Shibboleth client-storage page in \cref{LadokRedirectPost} depends
+on the browser behaviour: its hidden fields
+([[shib_idp_ls_exception.*]], [[shib_idp_ls_value.*]] and
+[[_eventId_proceed]]) carry no [[value]] attribute---JavaScript fills
+them in a browser---but the IdP requires the names to be posted even
+empty, and re-serves the page (an infinite loop, to us) if they
+aren't.
+So we complete the data with the form's remaining [[<input>]] fields
+as empty strings.
+We must not complete fields whose \emph{absence} is meaningful: an
+unchecked radio button or checkbox is omitted by a browser (the
+checked ones already appear among the successful controls), and
+button-like inputs are only submitted when pressed---the submit button
+is handled separately below.
+<<complete [[data]] with the form's valueless fields>>=
+for el in form.inputs:
+  if el.tag != "input" or not el.name or el.name in data:
+    continue
+  if el.type in {"radio", "checkbox", "submit", "button",
+                 "image", "reset", "file"}:
+    continue
+  data[el.name].append("")
+@
+
+Let's verify this on the client-storage page's shape: the valueless
+hidden fields must be posted empty, while an unchecked radio button
+must stay out.
+<<test functions>>=
+def test_form_submission_data_includes_valueless_fields():
+  page = html.fromstring("""
+    <form>
+      <input type="hidden" name="csrf_token" value="tok"/>
+      <input type="hidden"
+             name="shib_idp_ls_exception.shib_idp_session_ss"/>
+      <input type="hidden"
+             name="shib_idp_ls_success.shib_idp_session_ss"
+             value="false"/>
+      <input type="hidden"
+             name="shib_idp_ls_value.shib_idp_session_ss"/>
+      <input type="hidden" name="_eventId_proceed"/>
+      <input type="radio" name="choice" value="a"/>
+    </form>""")
+  data = ladok.form_submission_data(page.forms[0])
+  assert data["csrf_token"] == ["tok"]
+  assert data["shib_idp_ls_exception.shib_idp_session_ss"] == [""]
+  assert data["shib_idp_ls_value.shib_idp_session_ss"] == [""]
+  assert data["_eventId_proceed"] == [""]
+  assert "choice" not in data
 @
 
 In some cases, the form has named submit buttons and the server acts
