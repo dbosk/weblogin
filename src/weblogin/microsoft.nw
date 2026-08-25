@@ -913,7 +913,7 @@ class MicrosoftLogin(weblogin.AutologinHandler):
 
   <<MicrosoftLogin URL match helper>>
 
-  <<MicrosoftLogin need_login>>
+  <<MicrosoftLogin [[need_login]]>>
 
   <<MicrosoftLogin login>>
 @
@@ -949,7 +949,7 @@ decline.
 We deliberately do not inspect the response body.
 The authorize page is JavaScript-driven and may render differently
 across tenants and Azure AD updates; URL shape is the stable signal.
-<<MicrosoftLogin need_login>>=
+<<MicrosoftLogin [[need_login]]>>=
 def need_login(self, response):
   """
   Returns True if the response is an Azure AD ``oauth2/authorize``
