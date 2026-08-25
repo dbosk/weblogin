@@ -23,6 +23,7 @@ We need a class for LADOK that detects logins to LADOK.
 Then we implement the missing methods in the [[weblogin.AutologinHandler]] 
 class.
 <<[[ladok.py]]>>=
+import collections
 import logging
 
 from lxml import html
@@ -937,87 +938,179 @@ if form is None:
                                      f"not on LADOK: {ladok_response}")
 @
 
-Next, we want to extract default values from the forms variables and substitute 
-if needed.
-We get the form variables by iterating over the [[<input>]] elements, which we 
-do by the XPath expression [[.//input]].
-Note the leadning period ([[.]]), which means that we start from the current 
-node.
-Without it, we would get all the [[<input>]] elements in the document.
-That would cause problems further down the line, we'll get back to that.
-<<extract data and substitute variables>>=
-data = {}
+Next, we want to extract the values of the form's variables---the ones
+a browser would submit---and substitute our own values where needed.
+An earlier version hand-rolled this by iterating over the [[<input>]]
+elements and reimplementing the browser's submission rules: only the
+checked radio button counts, a name that occurs several times must
+yield several values (as in \cref{LadokConfirmDatasharing}), and only
+the elements of \emph{this} form count.
+Each of those rules was once a bug here\footnote{%
+  For example, using the XPath [[//input]] instead of [[.//input]]
+  picked up the username field of \emph{another} form on the same
+  page, submitted it twice and triggered a 500 error from the server.
+  Neither is [[form.inputs]] usable for this: it's a dictionary, so it
+  collapses several inputs sharing a name into one.
+}.
+But [[lxml]] already implements exactly these rules:
+[[form.form_values()]] returns the list of name--value pairs that a
+browser would submit, the \enquote{successful} controls.
+So we build the data from that, collecting the values per name in a
+list so that repeated names survive.
+(When [[requests]] is handed a list of values, it repeats the name for
+each value, just like a browser.)
+<<helper functions>>=
+def form_submission_data(form, values_map=None, casefold=False):
+  """
+  Returns the data to submit for the lxml `form` as a dictionary
+  mapping each field name to a list of values.
 
-for var in form.xpath(".//input"):
-  if var.name:
-    varname_casefold = var.name.casefold()
-    if varname_casefold in self.__vars:
-      data[var.name] = self.__vars[varname_casefold]
-    else:
-      <<set value in [[data]] for existing variables [[var]]>>
+  The values are the ones a browser would submit
+  (`form.form_values()`), plus the name and value of the form's
+  submit button, if any.
+
+  `values_map` maps field names to a value (or list of values) to use
+  instead of the form's own. If `casefold` is True, the field names
+  are casefolded before they're looked up in `values_map`.
+  """
+  values_map = values_map or {}
+  data = collections.defaultdict(list)
+  for name, value in form.form_values():
+    data[name].append(value)
+
+  <<add the submit button to [[data]]>>
+  <<override [[data]] with values from [[values_map]]>>
+  return dict(data)
 @
 
-There are some things we need to consider about these variables.
-\begin{enumerate}
-\item If a variable is given a value several times, we should make a 
-list\footnote{%
-  This doesn't seem like standard behaviour, because the [[lxml]] library 
-  doesn't do this.
-  See
-  [[<<extract data and substitute variables, new attempt>>]] below.
-}.
-This happens in \cref{LadokConfirmDatasharing}.
-Here the problem with the XPath [[//input]] (no leading period) mentioned above 
-arises.
-Without the period the username will occur twice (it's also in another form on 
-the same page), making it a list and triggering a 500 error from the server.
-\item If the [[<input>]] element is of the type radio button, we should check 
-which is checked (the default).
-If it's not checked, we ignore it and proceed to the next.
-This happens in \cref{LadokConfirmDatasharing}.
-\end{enumerate}
-<<set value in [[data]] for existing variables [[var]]>>=
-if var.type == "radio":
-  if var.checked:
-    data[var.name] = var.value
-elif var.name in data:
-  if isinstance(data[var.name], list):
-    data[var.name].append(var.value)
-  else:
-    data[var.name] = [data[var.name], var.value]
-else:
-  data[var.name] = var.value or ""
+In some cases, the form has named submit buttons and the server acts
+on which one was \enquote{pressed}:
+\cref{LadokConfirmDatasharing} has \enquote{Proceed} and
+\enquote{Cancel}.
+A browser includes only the button actually clicked among the
+submitted values, so [[form.form_values()]] cannot include any of
+them---we must pick one ourselves.
+An earlier version looked for a button whose name contains
+\enquote{proceed}, which was specific to that one page.
+Instead, we now press the form's submit button whichever its name:
+both [[<button>]] elements, whose type defaults to submit, and
+[[<input type="submit">]] elements count.
+<<helper functions>>=
+def submission_buttons(form):
+  """
+  Yields the submit buttons of the lxml `form`: the `<button>`
+  elements of type submit (the default type) and the
+  `<input type="submit">` elements.
+  """
+  for button in form.xpath(".//button"):
+    if button.get("type", "submit") == "submit":
+      yield button
+  for el in form.inputs:
+    if el.tag == "input" and el.type == "submit":
+      yield el
 @
 
-A better approach than the one above seems to be to use [[form.inputs]], which 
-is a dictionary containing all input elements of the form.
-This also handles the radio buttons of \cref{LadokConfirmDatasharing} 
-correctly, so that we only need to do [[element.value]] even for that group.
-<<extract data and substitute variables, new attempt>>=
-data = {}
+If the form has several submit buttons, we cannot know which one the
+user would press, so we warn and press the first.
+A button without a [[value]] attribute submits the empty string, just
+like in a browser---this is what the proceed button of
+\cref{LadokConfirmDatasharing} relies on.
+<<add the submit button to [[data]]>>=
+buttons = list(submission_buttons(form))
+if buttons:
+  if len(buttons) > 1:
+    logger.warning("Form has multiple submit buttons, "
+                   "pressing the first.")
+  name = buttons[0].get("name")
+  if name is not None:
+    data[name].append(buttons[0].get("value") or "")
+@
 
-for name, element in form.inputs.items():
-  name_casefold = name.casefold()
-  if name_casefold in self.__vars:
-    data[name] = self.__vars[name_casefold]
-  else:
-    data[name] = element.value
-@ But, unfortunately, this doesn't handle multiple [[<input>]] elements with 
-the same name.
-It just gives one of them, instead of making a list\footnote{%
-  This is why I think this might not be standard behaviour.
-}.
-This code would have otherwise been much better.
+Finally, the substitution.
+We iterate over [[form.inputs.keys()]] rather than over the collected
+[[data]]: an empty password field has no value and thus doesn't appear
+among the successful controls, but it's still a field we must be able
+to fill.
+The casefolded lookup lets the same [[vars]] dictionary match no
+matter how the institution spells [[Username]].
+<<override [[data]] with values from [[values_map]]>>=
+for name in form.inputs.keys():
+  key = name.casefold() if casefold else name
+  if key in values_map:
+    values = values_map[key]
+    if isinstance(values, str):
+      values = [values]
+    data[name] = list(values)
+@
 
-In some cases, there is a named button (\cref{LadokConfirmDatasharing} has 
-\enquote{Proceed} and \enquote{Cancel}).
-We must include that in the data, that we selected to proceed instead of 
-cancel.
+Let's first check that the browser's submission rules are respected:
+only the checked radio button, repeated names as several values, and
+the proceed button pressed---the page in
+\cref{LadokConfirmDatasharing}, in miniature.
+<<test functions>>=
+def test_form_submission_data_successful_controls():
+  page = html.fromstring("""
+    <form>
+      <input type="hidden" name="opt" value="a"/>
+      <input type="hidden" name="opt" value="b"/>
+      <input type="radio" name="consent" value="global"/>
+      <input type="radio" name="consent" value="remember" checked=""/>
+      <button type="submit" name="_eventId_proceed">Accept</button>
+    </form>""")
+  data = ladok.form_submission_data(page.forms[0])
+  assert data["opt"] == ["a", "b"]
+  assert data["consent"] == ["remember"]
+  assert data["_eventId_proceed"] == [""]
+@
+
+Next, the substitution: credentials must land in fields whose names
+match only up to case, and an empty password field must be fillable
+even though it contributes no successful control.
+<<test functions>>=
+def test_form_submission_data_substitutes_vars():
+  page = html.fromstring("""
+    <form>
+      <input type="text" name="Username"/>
+      <input type="password" name="Password"/>
+    </form>""")
+  data = ladok.form_submission_data(page.forms[0],
+                                    values_map={"username": "alice",
+                                                "password": "secret"},
+                                    casefold=True)
+  assert data["Username"] == ["alice"]
+  assert data["Password"] == ["secret"]
+@
+
+Finally, the buttons: a [[<button>]] of type button is not a submit
+button, and several submit buttons yield a warning.
+<<test functions>>=
+def test_submission_buttons():
+  page = html.fromstring("""
+    <form>
+      <input type="text" name="q"/>
+      <button name="proceed">Proceed</button>
+      <button type="button" name="cancel">Cancel</button>
+      <input type="submit" name="ok" value="OK"/>
+    </form>""")
+  buttons = list(ladok.submission_buttons(page.forms[0]))
+  assert [button.get("name") for button in buttons] == ["proceed", "ok"]
+
+def test_form_submission_data_warns_on_multiple_buttons(caplog):
+  page = html.fromstring("""
+    <form>
+      <button name="proceed" value="yes">Proceed</button>
+      <button name="cancel" value="no">Cancel</button>
+    </form>""")
+  data = ladok.form_submission_data(page.forms[0])
+  assert data["proceed"] == ["yes"]
+  assert "cancel" not in data
+  assert "multiple submit buttons" in caplog.text
+@
+
+In the login loop, the values to substitute are the ones the user gave
+us in [[vars]].
 <<extract data and substitute variables>>=
-for button in form.xpath("//button"):
-  name = button.get("name")
-  if button.get("type") == "submit" and "proceed" in name:
-    data[name] = ""
+data = form_submission_data(form, values_map=self.__vars, casefold=True)
 @
 
 Finally, we submit the form.
