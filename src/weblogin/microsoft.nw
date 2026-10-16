@@ -172,7 +172,10 @@ require real MFA interaction.
 
 <<test [[microsoft.py]]>>=
 import logging
+import subprocess
 import urllib.parse
+
+import pytest
 
 import weblogin
 import weblogin.microsoft as microsoft
@@ -528,7 +531,7 @@ def test_login_handles_xhtml_mfa_page(monkeypatch):
     )
   )
 
-  assert calls == [(["xmessage", "MFA: 42"], False)]
+  assert calls == [(["xmessage", "MFA: 42"], True)]
 @
 
 
@@ -561,6 +564,18 @@ This makes the mechanism completely flexible:
 If the variable is not set, we try to display the number using
 [[figlet]] for a large, visible terminal output.
 If [[figlet]] is not installed, we fall back to plain [[print]].
+
+A notification command can fail: a messaging client that cannot reach its
+server, a program that is not installed.
+Then the user gets no number to type into the Authenticator app, and the
+login waits until the server gives up on the challenge.
+Nobody sees why, because the command's own error message may go to a
+captured standard error, as under [[pytest]].
+So we check the command's exit status.
+If it failed, we warn and fall back to the terminal, which at least shows
+the number to a user at the terminal.
+The warning names only the program: the rest of the command can hold an
+address, such as the recipient of a Zulip message.
 <<notify user of MFA number>>=
 notification_cmd = os.environ.get(
   "WEBLOGIN_MFA_NOTIFICATION"
@@ -571,10 +586,18 @@ if notification_cmd is None:
 
 if notification_cmd:
   logger.debug("AzureMFA using notification command")
-  subprocess.run(
-    shlex.split(notification_cmd) + [mfa_message]
-  )
-else:
+  notifier = shlex.split(notification_cmd)
+  try:
+    subprocess.run(notifier + [mfa_message], check=True)
+  except (subprocess.CalledProcessError, OSError) as err:
+    logger.warning(
+      "AzureMFA notification command %s failed (%s), "
+      "showing the number in the terminal instead",
+      notifier[0], getattr(err, "returncode", type(err).__name__),
+    )
+    notification_cmd = None
+
+if not notification_cmd:
   try:
     logger.debug("AzureMFA using figlet notification fallback")
     subprocess.run(["figlet", mfa_message], check=True)
@@ -610,7 +633,7 @@ def test_notification_cmd_used_when_env_is_unset(monkeypatch):
   handler.login(object(), MockResponse(MFA_HTML))
 
   assert calls == [
-    (["notify-send", "Azure MFA", "MFA: 42"], False)
+    (["notify-send", "Azure MFA", "MFA: 42"], True)
   ]
 @
 
@@ -635,7 +658,7 @@ def test_env_notification_overrides_constructor(monkeypatch):
   )
   handler.login(object(), MockResponse(MFA_HTML))
 
-  assert calls == [(["xmessage", "MFA: 42"], False)]
+  assert calls == [(["xmessage", "MFA: 42"], True)]
 @
 
 Without either configuration mechanism, we try [[figlet]] before
@@ -680,6 +703,40 @@ def test_print_used_when_figlet_is_unavailable(
   handler.login(object(), MockResponse(MFA_HTML))
 
   assert capsys.readouterr().out == "MFA: 42\n"
+@
+
+A notification command that fails must not leave the user without the
+number.
+We inject the failures, a non-zero exit status and a program that is not
+installed, since a real notifier would send a real message.
+The fake follows [[subprocess.run]]: it raises only when asked to check.
+<<test functions>>=
+@pytest.mark.parametrize("failure", ["exit status", "not installed"])
+def test_failing_notification_cmd_falls_back_to_terminal(
+    monkeypatch, caplog, failure):
+  calls = []
+  monkeypatch.setenv("WEBLOGIN_MFA_NOTIFICATION",
+                     "zulip-send someone@example.org -m")
+  stub_successful_mfa_poll(monkeypatch)
+
+  def fake_run(cmd, check=False):
+    calls.append(cmd)
+    if cmd[0] != "zulip-send":
+      return subprocess.CompletedProcess(cmd, 0)
+    if failure == "not installed":
+      raise FileNotFoundError(cmd[0])
+    if check:
+      raise subprocess.CalledProcessError(1, cmd)
+    return subprocess.CompletedProcess(cmd, 1)
+
+  monkeypatch.setattr(microsoft.subprocess, "run", fake_run)
+
+  with caplog.at_level(logging.WARNING, logger="weblogin.microsoft"):
+    AzureMFA().login(object(), MockResponse(MFA_HTML))
+
+  assert calls[-1] == ["figlet", "MFA: 42"]
+  assert "zulip-send" in caplog.text
+  assert "someone@example.org" not in caplog.text
 @
 
 
