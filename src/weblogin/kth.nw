@@ -1044,10 +1044,19 @@ def _request_url(args, kwargs):
 The third rule needs to know whether we are inside our own repeat.
 The repeat's response passes through [[need_login]] and possibly [[login]]
 again, so we keep a flag on the handler for as long as the repeat runs.
-We set its default on the class rather than in the constructor:
+We set the flag's default on the class rather than in the constructor:
 [[ladok3]] caches its session with [[pickle]], and a handler pickled by an
 earlier version is unpickled without running the constructor, so it would
 lack an attribute that only the constructor sets.
+
+When the repeat is over we delete the flag instead of setting it to false.
+The handler's equality compares the attributes of the instance
+(\cref{HandlerEquality}), and a program that shares a session adds its
+handlers only if no equal one is present.
+After the deletion the class default shows through again and the instance
+has the attributes it had before the repeat, so it still equals a fresh
+[[SAMLlogin]] with the same configuration.
+A flag left on the instance would make every such program add a copy.
 <<SAML handler class attributes>>=
 __rerunning = False
 <<re-run the triggering request once>>=
@@ -1059,7 +1068,7 @@ self.__rerunning = True
 try:
   return session.request(*args, **(kwargs or {}))
 finally:
-  self.__rerunning = False
+  del self.__rerunning
 @
 
 We cannot record these flows: they pass through KTH's identity provider with
@@ -1216,6 +1225,31 @@ def test_SAMLlogin_reruns_at_most_once():
 
   assert services.count("GET", f"{SP}/api") == 2
   assert response.text == "not accepted"
+@
+
+A handler that has re-run a request must still equal a fresh one with the same
+configuration.
+Programs that share a session add their handlers with [[add_handler]], which
+skips a handler that is already present by comparing them
+(\cref{HandlerEquality}); [[kthutils]] adds its [[SAMLlogin]] to [[ladok3]]'s
+cached session on every run.
+If the flag of the third rule counted as configuration, every such run would
+add one more [[SAMLlogin]], and each copy would repeat the request once more.
+<<test functions>>=
+def test_SAMLlogin_is_not_duplicated_after_a_rerun():
+  services = FakeServices({
+    ("GET", f"{SP}/api"):
+      lambda r: (302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""),
+    ("GET", IDP_REDIRECT_SSO): lambda r: (200, {}, relay_form(f"{SP}/acs")),
+    ("POST", f"{SP}/acs"): lambda r: (200, {}, "ok"),
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+  session.get(f"{SP}/api")
+
+  session.add_handler(weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  assert len(session._AutologinSession__handlers) == 1
 @
 
 If the identity provider's page has no form, we forwarded nothing, so the
