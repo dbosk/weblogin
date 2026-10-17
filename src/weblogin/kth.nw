@@ -779,9 +779,11 @@ class SAMLlogin(weblogin.AutologinHandler):
   UG (login.ug.kth.se) which handles the password-based authentication.
   """
 
+  <<SAML handler class attributes>>
+
   def __init__(self, rerun_requests=False):
     """
-    Creates a login handler that automatically handles the SAML requests used 
+    Creates a login handler that automatically handles the SAML requests used
     at KTH.
     """
     super().__init__()
@@ -798,22 +800,27 @@ class SAMLlogin(weblogin.AutologinHandler):
 
     <<check if we're redirected to SAML server>>
 
+  <<SAML handler helpers>>
+
   def login(self, session, response, args=None, kwargs=None):
     """
     - Performs an action based on the response `response` from a request to
       session `session`.
     - `args` and `kwargs` are the options from the request triggering the login
       procedure, this is so that we can redo that request after logging in.
+      Requests to the identity provider itself are never redone, and a request
+      is redone at most once.
     - Raises an AuthenticationError exception on fails.
     """
     self.__logging_in = True
+    forwarded = False
     try:
       <<run SAML procedure, produce new response>>
     finally:
       self.__logging_in = False
 
-    if self.__rerun_requests and args:
-      return session.request(*args, **(kwargs or {}))
+    if (<<the triggering request should be re-run>>):
+      <<re-run the triggering request once>>
     return saml_response
 @
 
@@ -823,16 +830,52 @@ The SAML URL gotten from SeamlessAccess.org is\footnote{%
   As of 2022-11-30.
 } [[saml.sys.kth.se]], but the reverse lookup resolves to 
 [[saml-5.sys.kth.se]].
-So we will simply check if the domain contains both [[saml]] and 
+So we will simply check if the domain contains both [[saml]] and
 [[sys.kth.se]].
+
+We check the host name, not the whole URL.
+Other services name KTH's identity provider in their own URLs: LADOK's login
+URL carries [[entityID=https://saml.sys.kth.se/...]] in its query.
+Matching anywhere in the URL made [[SAMLlogin]] claim such a LADOK page as
+its own, which in a session shared with [[SSOlogin]] puts two handlers on the
+same page.
+We need the same check for request URLs too (\cref{SAMLrerun}), so we keep it
+in a helper.
 <<check if we're redirected to SAML server>>=
-needs_login = "saml" in response.url and "sys.kth.se" in response.url
+needs_login = self._is_saml_url(response.url)
 if needs_login:
   logger.debug(
     "SAMLlogin detected SAML response %s",
     weblogin._sanitize_url(response.url),
   )
 return needs_login
+<<SAML handler helpers>>=
+@staticmethod
+def _is_saml_url(url):
+  """Return True if `url` belongs to KTH's SAML identity provider."""
+  host = urllib.parse.urlparse(url or "").hostname or ""
+  return "saml" in host and host.endswith("sys.kth.se")
+@
+
+Let's verify that the identity provider's own pages are claimed and that a
+LADOK page naming the provider in its query is not.
+<<test functions>>=
+def test_SAMLlogin_claims_only_the_identity_providers_host():
+  def response_at(url):
+    response = requests.Response()
+    response.status_code = requests.codes.ok
+    response.url = url
+    response.history = []
+    return response
+
+  handler = weblogin.kth.SAMLlogin()
+  assert handler.need_login(response_at(
+    "https://saml-5.sys.kth.se/idp/profile/SAML2/Redirect/SSO?e=1"))
+  assert handler.need_login(response_at(
+    "https://saml.sys.kth.se/idp/profile/SAML2/Redirect/SSO"))
+  assert not handler.need_login(response_at(
+    "https://start.test.ladok.se/Shibboleth.sso/Login"
+    "?SAMLDS=1&entityID=https://saml.sys.kth.se/idp/shibboleth"))
 @
 
 \subsection{Run KTH's SAML procedure}
@@ -845,7 +888,7 @@ All in all, we want to produce a new response from the server,
 [[saml_response]] from above.
 
 We start by extracting any form.
-If there is no form, we simply proceed without doing anything.
+If there is no form, there is nothing for us to forward.
 <<run SAML procedure, produce new response>>=
 logger.debug(
   "SAMLlogin starting for %s",
@@ -861,13 +904,21 @@ else:
   <<post form action>>
 @
 
-Now, it's easy to ignore this request.
+A page without a form is either the end of the provider's part or an error.
+An error page means that the login failed, and we say so, rather than
+returning a page that the caller would take for the service's answer.
+Otherwise we leave the page as it is: it becomes our response, and we have
+forwarded nothing.
 <<don't handle this request>>=
 logger.debug(
   "SAMLlogin found no form in %s",
   weblogin._sanitize_url(response.url),
 )
-pass
+if response.status_code != requests.codes.ok:
+  raise weblogin.AuthenticationError(
+    f"SAML error: status {response.status_code} and no form at "
+    f"{weblogin._sanitize_url(response.url)}")
+saml_response = response
 @
 
 To extract the data, we simply traverse the inputs available in the form.
@@ -895,6 +946,7 @@ logger.debug(
   weblogin._sanitize_url(action_url),
 )
 saml_response = session.request(form.method, action_url, data=data)
+forwarded = True
 
 if saml_response.status_code != requests.codes.ok:
   raise weblogin.AuthenticationError(
@@ -931,4 +983,291 @@ def test_SAMLlogin_resets_logging_in_after_exception(monkeypatch):
     assert False
 
   assert handler.need_login(response)
+@
+
+\subsection{Re-running the triggering request}\label{SAMLrerun}
+
+With [[rerun_requests]], [[SAMLlogin]] repeats the request that led to the
+identity provider once the relay is done.
+That request is usually the caller's own, for instance a SharePoint API call
+that was sent to KTH's identity provider for want of a session.
+Once the relay has given the service its session cookie, the repeated request
+gets the answer that the caller wanted.
+
+But the triggering request is not always the caller's.
+Handlers share a session, and another handler's login can pass through KTH's
+identity provider too.
+LADOK's [[SSOlogin]] (\cref{LogIntoLADOK}) posts the SAML response from the
+home organization to the provider, as one step of its own flow.
+The provider redirects to a relay form, which [[SAMLlogin]] claims and
+forwards to LADOK.
+Then the triggering request is that post: a protocol message that the
+provider accepts once.
+Repeating it gave an error page, which [[SAMLlogin]] claimed again, found no
+form in, and repeated the post once more.
+That went on until Python's recursion limit stopped it; with [[ladok3]]'s
+retries on server errors, after about a quarter of an hour.
+The login itself had succeeded before the first repeat.
+
+Hence three rules for the repeat:
+\begin{enumerate}
+\item We never repeat a request to the identity provider itself.
+  Such a request is a step of some login flow, and the flow that sent it
+  continues from the response that we return:
+  [[SSOlogin]] finds itself at LADOK and is done.
+\item We repeat only after we forwarded a form.
+  If there was nothing to forward, nothing has changed, and the repeat would
+  get the same response.
+\item We repeat at most once.
+  If the service sends the repeated request back to the identity provider, we
+  relay that round too, but another repeat would only take the same round
+  again.
+\end{enumerate}
+<<the triggering request should be re-run>>=
+self.__rerun_requests and args and forwarded
+and not self.__rerunning
+and not self._is_saml_url(self._request_url(args, kwargs))
+@
+
+The handler gets the triggering request as the arguments of
+[[requests.Session.request]], where the URL may come positionally or by
+keyword.
+<<SAML handler helpers>>=
+@staticmethod
+def _request_url(args, kwargs):
+  """Return the URL of a request given as `Session.request` arguments."""
+  if args and len(args) > 1:
+    return args[1]
+  return (kwargs or {}).get("url")
+@
+
+The third rule needs to know whether we are inside our own repeat.
+The repeat's response passes through [[need_login]] and possibly [[login]]
+again, so we keep a flag on the handler for as long as the repeat runs.
+We set the flag's default on the class rather than in the constructor:
+[[ladok3]] caches its session with [[pickle]], and a handler pickled by an
+earlier version is unpickled without running the constructor, so it would
+lack an attribute that only the constructor sets.
+
+When the repeat is over we delete the flag instead of setting it to false.
+The handler's equality compares the attributes of the instance
+(\cref{HandlerEquality}), and a program that shares a session adds its
+handlers only if no equal one is present.
+After the deletion the class default shows through again and the instance
+has the attributes it had before the repeat, so it still equals a fresh
+[[SAMLlogin]] with the same configuration.
+A flag left on the instance would make every such program add a copy.
+<<SAML handler class attributes>>=
+__rerunning = False
+<<re-run the triggering request once>>=
+logger.debug(
+  "SAMLlogin re-running %s",
+  weblogin._sanitize_url(self._request_url(args, kwargs)),
+)
+self.__rerunning = True
+try:
+  return session.request(*args, **(kwargs or {}))
+finally:
+  del self.__rerunning
+@
+
+We cannot record these flows: they pass through KTH's identity provider with
+one-time SAML messages, and the failure we guard against needs the provider to
+refuse a replay.
+So we serve the three parties from memory, through a [[requests]] transport
+adapter, and let the real [[AutologinSession]] and [[SAMLlogin]] drive them.
+Each route maps a method and a URL (without its query) to a function that
+returns the status, the headers and the body.
+The adapter keeps every request it serves, so a test can count them.
+<<test functions>>=
+IDP = "https://saml-5.sys.kth.se/idp/profile"
+IDP_POST_SSO = f"{IDP}/Authn/SAML2/POST/SSO"
+IDP_REDIRECT_SSO = f"{IDP}/SAML2/Redirect/SSO"
+LADOK = "https://start.test.ladok.se"
+SP = "https://sp.example.org"
+
+def relay_form(action):
+  return ("<html><body><form method='post' action='" + action + "'>"
+          "<input name='SAMLResponse' value='assertion'>"
+          "</form></body></html>")
+
+class FakeServices(requests.adapters.BaseAdapter):
+  """Serves fixed routes from memory and keeps the requests it served."""
+  def __init__(self, routes):
+    super().__init__()
+    self.routes = routes
+    self.served = []
+
+  def send(self, request, **kwargs):
+    url = request.url.split("?")[0]
+    self.served.append((request.method, url))
+    status, headers, body = self.routes[(request.method, url)](request)
+    response = requests.Response()
+    response.status_code = status
+    response.headers = requests.structures.CaseInsensitiveDict(headers)
+    response._content = body.encode("utf-8")
+    response.encoding = "utf-8"
+    response.url = request.url
+    response.request = request
+    return response
+
+  def close(self):
+    pass
+
+  def count(self, method, url):
+    return self.served.count((method, url))
+
+def session_with(services, *handlers):
+  session = weblogin.AutologinSession(list(handlers))
+  for prefix in (IDP, LADOK, SP):
+    session.mount(prefix, services)
+  return session
+@
+
+First the case that hung [[ladok3]].
+LADOK's [[SSOlogin]] posts the SAML response from the user's home
+organization to KTH's identity provider, as one step of its own flow.
+The provider redirects to a relay form, which [[SAMLlogin]] forwards to LADOK.
+The provider accepts each SAML response once, so a second post of the same
+one gets an error page.
+The step must reach the provider exactly once and end logged in at LADOK.
+<<test functions>>=
+def test_SAMLlogin_does_not_replay_a_step_of_the_SAML_protocol():
+  posts_to_idp = []
+
+  def idp_post(request):
+    posts_to_idp.append(request.body)
+    if len(posts_to_idp) > 1:
+      return 500, {}, "<html><body>Stale request</body></html>"
+    return 302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""
+
+  services = FakeServices({
+    ("POST", IDP_POST_SSO): idp_post,
+    ("GET", IDP_REDIRECT_SSO):
+      lambda r: (200, {}, relay_form(f"{LADOK}/Shibboleth.sso/SAML2/POST")),
+    ("POST", f"{LADOK}/Shibboleth.sso/SAML2/POST"):
+      lambda r: (302, {"Location": f"{LADOK}/gui/app/gui/"}, ""),
+    ("GET", f"{LADOK}/gui/app/gui/"): lambda r: (200, {}, "LADOK"),
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  response = session.request("POST", IDP_POST_SSO,
+                             data={"SAMLResponse": "from-adfs"})
+
+  assert response.url == f"{LADOK}/gui/app/gui/"
+  assert len(posts_to_idp) == 1
+@
+
+When the provider answers with an error page and no form, there is nothing to
+forward, and the login has failed.
+<<test functions>>=
+def test_SAMLlogin_raises_on_error_page_without_form():
+  handler = weblogin.kth.SAMLlogin(rerun_requests=True)
+  response = requests.Response()
+  response.status_code = requests.codes.internal_server_error
+  response.url = IDP_POST_SSO
+  response._content = b"<html><body>Stale request</body></html>"
+  response.history = []
+
+  with pytest.raises(weblogin.AuthenticationError):
+    handler.login(weblogin.AutologinSession([handler]), response,
+                  ("POST", IDP_POST_SSO), {})
+@
+
+The re-run is what [[rerun_requests]] is for, so it must survive the fix.
+A service provider redirects an unauthenticated request to the identity
+provider; once [[SAMLlogin]] has relayed the assertion, the same request
+succeeds.
+<<test functions>>=
+def test_SAMLlogin_reruns_the_original_request_after_the_relay():
+  logged_in = []
+
+  def api(request):
+    if logged_in:
+      return 200, {}, "data"
+    return 302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""
+
+  def acs(request):
+    logged_in.append(True)
+    return 200, {}, "logged in"
+
+  services = FakeServices({
+    ("GET", f"{SP}/api"): api,
+    ("GET", IDP_REDIRECT_SSO): lambda r: (200, {}, relay_form(f"{SP}/acs")),
+    ("POST", f"{SP}/acs"): acs,
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  response = session.get(f"{SP}/api")
+
+  assert response.text == "data"
+  assert services.count("GET", f"{SP}/api") == 2
+@
+
+A service provider that never accepts the assertion sends the re-run back to
+the identity provider.
+We relay that second round too, but we do not re-run again: the request would
+only take the same round once more.
+<<test functions>>=
+def test_SAMLlogin_reruns_at_most_once():
+  services = FakeServices({
+    ("GET", f"{SP}/api"):
+      lambda r: (302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""),
+    ("GET", IDP_REDIRECT_SSO): lambda r: (200, {}, relay_form(f"{SP}/acs")),
+    ("POST", f"{SP}/acs"): lambda r: (200, {}, "not accepted"),
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  response = session.get(f"{SP}/api")
+
+  assert services.count("GET", f"{SP}/api") == 2
+  assert response.text == "not accepted"
+@
+
+A handler that has re-run a request must still equal a fresh one with the same
+configuration.
+Programs that share a session add their handlers with [[add_handler]], which
+skips a handler that is already present by comparing them
+(\cref{HandlerEquality}); [[kthutils]] adds its [[SAMLlogin]] to [[ladok3]]'s
+cached session on every run.
+If the flag of the third rule counted as configuration, every such run would
+add one more [[SAMLlogin]], and each copy would repeat the request once more.
+<<test functions>>=
+def test_SAMLlogin_is_not_duplicated_after_a_rerun():
+  services = FakeServices({
+    ("GET", f"{SP}/api"):
+      lambda r: (302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""),
+    ("GET", IDP_REDIRECT_SSO): lambda r: (200, {}, relay_form(f"{SP}/acs")),
+    ("POST", f"{SP}/acs"): lambda r: (200, {}, "ok"),
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+  session.get(f"{SP}/api")
+
+  session.add_handler(weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  assert len(session._AutologinSession__handlers) == 1
+@
+
+If the identity provider's page has no form, we forwarded nothing, so the
+caller's request would only get the same page again.
+We return the page instead of repeating the request.
+<<test functions>>=
+def test_SAMLlogin_does_not_rerun_when_nothing_was_forwarded():
+  services = FakeServices({
+    ("GET", f"{SP}/api"):
+      lambda r: (302, {"Location": IDP_REDIRECT_SSO + "?execution=e1s1"}, ""),
+    ("GET", IDP_REDIRECT_SSO):
+      lambda r: (200, {}, "<html><body>Choose an account</body></html>"),
+  })
+  session = session_with(
+    services, weblogin.kth.SAMLlogin(rerun_requests=True))
+
+  response = session.get(f"{SP}/api")
+
+  assert services.count("GET", f"{SP}/api") == 1
+  assert "Choose an account" in response.text
 @
